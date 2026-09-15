@@ -397,10 +397,18 @@ and records what it applied — lock, DDL, and bookkeeping commit together.
 - Migration versions are **append-only** and the SQL of a released version is
   frozen: a database that recorded version N will never re-run it, so a
   correction is a new version, never an edit.
+- The frozen-text rule is enforced mechanically (issue #73): each registry row
+  records a SHA-256 checksum of the version's statement text, and the runner
+  verifies every already-applied version against the code's current text before
+  applying anything. An in-place edit of a shipped version fails the startup
+  with an error naming the version. Rows written by a pre-checksum build (or
+  inserted by hand without one) have a `NULL` checksum, which is accepted once
+  and backfilled from the current text on the next run.
 - Running the migration again is a no-op (it re-reads the version table inside
   the lock), so restarts and rolling updates cost one locked read.
 - With `auto_migrate` off, apply the statements out of band and insert the
-  matching `collab_schema_migrations` rows.
+  matching `collab_schema_migrations` rows (the `checksum` column may be left
+  `NULL`; the next auto-migrating startup backfills it).
 
 #### Startup version preflight
 
