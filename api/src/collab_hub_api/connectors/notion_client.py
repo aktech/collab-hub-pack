@@ -124,8 +124,12 @@ class NotionClient:
 
         results: list[NotionSearchHit] = []
         cursor = start_cursor.strip()
-        page_size = min(max(limit, 1), _NOTION_MAX_PAGE_SIZE)
         for _page in range(_MAX_SEARCH_PAGES):
+            # Size each request to the remaining capacity so a page boundary
+            # always lands on the limit. Stopping mid-page would return the
+            # provider cursor for the *whole* page and silently drop any unread
+            # in-window results after the limit-th hit.
+            page_size = min(max(limit - len(results), 1), _NOTION_MAX_PAGE_SIZE)
             body: dict = {
                 "page_size": page_size,
                 "sort": {"timestamp": "last_edited_time", "direction": "descending"},
@@ -363,14 +367,14 @@ def _page_title(page: object) -> str:
     if isinstance(properties, dict):
         for value in properties.values():
             if isinstance(value, dict) and value.get("type") == "title":
-                return _rich_text_plain(value.get("title"))
+                return sanitize_connector_text(_rich_text_plain(value.get("title")))
     return ""
 
 
 def _database_title(database: object) -> str:
     if not isinstance(database, dict):
         return ""
-    return _rich_text_plain(database.get("title"))
+    return sanitize_connector_text(_rich_text_plain(database.get("title")))
 
 
 def _block_text(block: object) -> str:

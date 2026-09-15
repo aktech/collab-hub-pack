@@ -766,3 +766,107 @@ async def test_notion_query_database_cursor_and_limit(tmp_path, monkeypatch):
     assert captured["body"]["start_cursor"] == "c0"
     assert [row["title"] for row in body["rows"]] == ["R1"]
     assert body["next_page_token"] == "c2"
+
+
+async def test_notion_search_preserves_unconsumed_results_across_pages(tmp_path, monkeypatch):
+    # limit=2 with an until_date filter: newest-first, page 1 opens with a
+    # too-new item that is skipped, then A; B and C follow. The connector must
+    # return [A, B] AND a cursor that still yields C -- never drop C by echoing
+    # the whole-page cursor after stopping mid-page.
+    id_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    id_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    id_c = "cccccccccccccccccccccccccccccccc"
+    items = [
+        _page_hit(PAGE_ID, "TooNew", "2026-03-15T00:00:00.000Z"),
+        _page_hit(id_a, "A", "2026-02-10T00:00:00.000Z"),
+        _page_hit(id_b, "B", "2026-02-09T00:00:00.000Z"),
+        _page_hit(id_c, "C", "2026-02-08T00:00:00.000Z"),
+    ]
+
+    def handler(request: httpx.Request) -> Response:
+        body = json.loads(request.content)
+        size = body["page_size"]
+        start = int(body.get("start_cursor") or 0)
+        page = items[start : start + size]
+        nxt = start + size
+        has_more = nxt < len(items)
+        return Response(
+            200,
+            json={"results": page, "has_more": has_more, "next_cursor": str(nxt) if has_more else None},
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        first = await client.post(
+            "/v1/connectors/notion/search",
+            headers=_auth_header(),
+            json={"query": "x", "limit": 2, "until_date": "2026-02-28", "time_zone": "UTC"},
+        )
+        body = first.json()
+        assert [hit["title"] for hit in body["hits"]] == ["A", "B"]
+        # C must remain reachable, not silently dropped.
+        assert body["next_page_token"] != ""
+        second = await client.post(
+            "/v1/connectors/notion/search",
+            headers=_auth_header(),
+            json={
+                "query": "x",
+                "limit": 2,
+                "until_date": "2026-02-28",
+                "time_zone": "UTC",
+                "page_token": body["next_page_token"],
+            },
+        )
+    assert [hit["title"] for hit in second.json()["hits"]] == ["C"]
+
+
+async def test_notion_search_sanitizes_urls_in_titles(tmp_path, monkeypatch):
+    # A URL typed into the visible title text (not an href/url field) must be
+    # neutralized like any other connector text -- dropping href is not enough.
+    def handler(request: httpx.Request) -> Response:
+        return Response(
+            200,
+            json={
+                "results": [
+                    _page_hit(PAGE_ID, "Notes https://example.com/x", "2026-02-01T00:00:00.000Z"),
+                    _database_hit(DATABASE_ID, "Board https://foo.example/y", "2026-01-15T00:00:00.000Z"),
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    body = response.json()
+    assert [hit["title"] for hit in body["hits"]] == ["Notes [link]", "Board [link]"]
+    assert "example.com" not in response.text
+    assert "foo.example" not in response.text
+
+
+async def test_notion_read_page_sanitizes_url_in_title(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        path = request.url.path
+        if path.endswith(f"/v1/pages/{PAGE_ID}"):
+            return Response(
+                200,
+                json={"object": "page", "id": PAGE_ID, "properties": _title_property("Spec https://example.com/s")},
+            )
+        if path.endswith(f"/v1/blocks/{PAGE_ID}/children"):
+            return Response(200, json={"results": [], "has_more": False, "next_cursor": None})
+        return Response(404, json={"object": "error", "message": "nope"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
+        )
+    body = response.json()
+    assert body["title"] == "Spec [link]"
+    assert "example.com" not in response.text
