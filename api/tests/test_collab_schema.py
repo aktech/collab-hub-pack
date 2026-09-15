@@ -284,6 +284,30 @@ EXPECTED_CHECKSUMS = {
     version: collab_migration_checksum(statements) for version, statements in COLLAB_SCHEMA_MIGRATIONS
 }
 
+# The released digests, as literals. A mismatch here means live deployments
+# will refuse their next rollout with CollabSchemaChecksumError: the digest
+# covers the statements' exact text INCLUDING indentation, so re-indenting the
+# migration tuple (moving it into a class, a dedent, a quoting change) changes
+# every digest even though the SQL is untouched. Restore the text — never
+# update a pinned digest. Appending a new version means adding one line here.
+PINNED_CHECKSUMS = {
+    1: "9c557cd37a49b334b11a2e5cf8cc4d3574ab71bb4f37a87ee691fbc9d6e2072b",
+    2: "df9698121563cfcf06fc215c943d52e1fd7dc87b14e870717aa7ea52b4e160c5",
+    3: "49b961afc49e30e64edb7b0bfdc09e5f8da8d4e690b373d5ef0ebf1468b9e4e1",
+    4: "89f34af66d0f7e8a06a398ce43aeed2db93432cfd06ab72e236da2da90a07d8c",
+    5: "d6bdbe0d90f9206e5104c448d547b5917e68d7af6db5069b4b2b9a44983b770f",
+    6: "6150df72bb6ed264e1e40b60768f787e4e044e1bf8b232da19ba5a2eaf139835",
+}
+
+
+def test_released_digests_are_pinned_as_literals():
+    """The one failure mode checksums introduce, covered: a source refactor
+    that changes a released statement's *text* without touching its SQL would
+    keep every computed-against-itself assertion green while bricking every
+    deployed database's next startup. The literals catch it in CI instead."""
+
+    assert EXPECTED_CHECKSUMS == PINNED_CHECKSUMS
+
 
 def _with_edited_version_one() -> tuple[tuple[int, tuple[str, ...]], ...]:
     """The real migration list with version 1's last statement edited in place —

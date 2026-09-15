@@ -520,7 +520,10 @@ def _verify_recorded_checksums(conn) -> dict[int, str]:
     """Check every applied version's recorded checksum against the code's text.
 
     Runs inside the runner's locked transaction, **before** anything is
-    applied. Returns ``{version: recorded_checksum}`` for the applied rows.
+    applied. Returns ``{version: recorded_checksum}`` for the applied rows —
+    the caller only needs ``max()`` of the keys, but the full mapping is what
+    tests (and any future caller reporting on checksum state) assert against,
+    so don't simplify it to a version number.
 
     Three cases per applied row:
 

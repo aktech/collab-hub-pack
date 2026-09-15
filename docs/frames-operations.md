@@ -408,7 +408,15 @@ and records what it applied — lock, DDL, and bookkeeping commit together.
   the lock), so restarts and rolling updates cost one locked read.
 - With `auto_migrate` off, apply the statements out of band and insert the
   matching `collab_schema_migrations` rows (the `checksum` column may be left
-  `NULL`; the next auto-migrating startup backfills it).
+  `NULL`; the next auto-migrating startup backfills it). To record a real
+  checksum instead of relying on the backfill, compute it from the build you
+  applied:
+
+  ```sh
+  python -c 'from collab_hub_api.frames.collab_schema import \
+  COLLAB_SCHEMA_MIGRATIONS, collab_migration_checksum; \
+  print({v: collab_migration_checksum(s) for v, s in COLLAB_SCHEMA_MIGRATIONS})'
+  ```
 
 #### Startup version preflight
 
