@@ -21,12 +21,9 @@ class NotionTokenProvider:
     """Resolve a per-user Notion workspace bot token.
 
     Notion is not an OIDC provider: it issues a non-expiring, workspace-scoped
-    bot token with no refresh token. Under Option A the token is brokered through
-    a Keycloak generic-OAuth identity provider (this class, near-identical to
-    ``GitHubTokenProvider``). Under Option B the broker call is replaced by a read
-    from the Hub's own encrypted per-user token store, keyed by the Hub identity
-    in ``request`` -- the exceptions and return type stay the same, so nothing
-    below the provider changes. See docs/notion-connector.md (Option A vs B).
+    bot token with no refresh token. The token is brokered through a Keycloak
+    generic-OAuth identity provider (this class, near-identical to
+    ``GitHubTokenProvider``). See docs/notion-connector.md.
     """
 
     def __init__(self, config: NotionConnectorConfig):
