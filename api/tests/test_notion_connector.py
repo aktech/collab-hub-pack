@@ -473,3 +473,296 @@ async def test_notion_search_provider_timeout_is_502(tmp_path, monkeypatch):
             "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
         )
     assert response.status_code == 502
+
+
+# --- more error mappings + client edges (coverage) ------------------------
+
+BROKER_URL = "https://keycloak.test/realms/nebari/broker/notion/token"
+
+
+def _broker_config(tmp_path, broker_status: int):
+    """Config with no static token, so the broker path runs, plus a handler
+    whose broker response has ``broker_status`` and whose Notion calls succeed."""
+
+    def handler(request: httpx.Request) -> Response:
+        if "broker" in request.url.path:
+            if broker_status == 200:
+                return Response(200, json={"access_token": "ntn_brokered"})
+            return Response(broker_status, json={"object": "error", "message": "broker"})
+        return _ok_status_handler(request)
+
+    return _config(tmp_path, static_access_token="", broker_token_url=BROKER_URL), handler
+
+
+async def test_notion_search_broker_not_connected_is_409(tmp_path, monkeypatch):
+    config, handler = _broker_config(tmp_path, 404)
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(config)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    assert response.status_code == 409
+
+
+async def test_notion_search_broker_reconnect_is_409(tmp_path, monkeypatch):
+    config, handler = _broker_config(tmp_path, 401)
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(config)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    assert response.status_code == 409
+
+
+async def test_notion_search_broker_token_error_is_503(tmp_path, monkeypatch):
+    config, handler = _broker_config(tmp_path, 500)
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(config)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    assert response.status_code == 503
+
+
+async def test_notion_read_page_upstream_error_is_502(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith(f"/v1/pages/{PAGE_ID}"):
+            return Response(500, json={"object": "error", "status": 500, "message": "boom"})
+        return Response(404, json={"object": "error", "message": "nope"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
+        )
+    assert response.status_code == 502
+
+
+async def test_notion_read_page_transport_error_is_502(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        raise httpx.ConnectTimeout("t", request=request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
+        )
+    assert response.status_code == 502
+
+
+async def test_notion_query_database_stale_cursor_is_422(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        return Response(
+            400,
+            json={"object": "error", "status": 400, "code": "validation_error", "message": "bad cursor"},
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/databases/{DATABASE_ID}/query",
+            headers=_auth_header(),
+            json={"page_token": "garbage"},
+        )
+    assert response.status_code == 422
+
+
+async def test_notion_query_database_provider_error_is_502(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        return Response(500, json={"object": "error", "status": 500, "message": "boom"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/databases/{DATABASE_ID}/query", headers=_auth_header(), json={}
+        )
+    assert response.status_code == 502
+
+
+async def test_notion_query_database_transport_error_is_502(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        raise httpx.ConnectTimeout("t", request=request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/databases/{DATABASE_ID}/query", headers=_auth_header(), json={}
+        )
+    assert response.status_code == 502
+
+
+async def test_notion_search_invalid_json_is_502(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        return Response(200, content=b"<html>not json</html>")
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    assert response.status_code == 502
+
+
+async def test_notion_search_skips_non_content_results(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        return Response(
+            200,
+            json={
+                "results": [
+                    "not-a-dict",
+                    {"object": "user", "id": "u1"},
+                    {"object": "page"},  # missing id
+                    _page_hit(PAGE_ID, "Real", "2026-02-01T00:00:00.000Z"),
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    body = response.json()
+    assert [hit["title"] for hit in body["hits"]] == ["Real"]
+
+
+async def test_notion_search_skips_items_newer_than_window(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        return Response(
+            200,
+            json={
+                "results": [
+                    _page_hit(PAGE_ID, "Future", "2026-03-15T00:00:00.000Z"),
+                    _page_hit("22222222222222222222222222222222", "In window", "2026-02-10T00:00:00.000Z"),
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search",
+            headers=_auth_header(),
+            json={"query": "x", "until_date": "2026-02-28", "time_zone": "UTC"},
+        )
+    body = response.json()
+    assert [hit["title"] for hit in body["hits"]] == ["In window"]
+
+
+async def test_notion_search_stuck_cursor_is_502(tmp_path, monkeypatch):
+    # Provider keeps handing back the same cursor while claiming has_more -> the
+    # client must break the loop as a 502, not spin forever.
+    def handler(request: httpx.Request) -> Response:
+        return Response(200, json={"results": [], "has_more": True, "next_cursor": "loop"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
+        )
+    assert response.status_code == 502
+
+
+async def test_notion_search_days_back_window(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> Response:
+        captured["body"] = json.loads(request.content)
+        return Response(200, json={"results": [], "has_more": False, "next_cursor": None})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/notion/search",
+            headers=_auth_header(),
+            json={"query": "x", "days_back": 7, "time_zone": "UTC"},
+        )
+    assert response.status_code == 200
+
+
+async def test_notion_read_page_walks_nested_and_paginated_blocks(tmp_path, monkeypatch):
+    child_id = "33333333333333333333333333333333"
+
+    def handler(request: httpx.Request) -> Response:
+        path = request.url.path
+        if path.endswith(f"/v1/pages/{PAGE_ID}"):
+            return Response(200, json={"object": "page", "id": PAGE_ID, "properties": _title_property("Nested")})
+        if path.endswith(f"/v1/blocks/{PAGE_ID}/children"):
+            if request.url.params.get("start_cursor") == "b2":
+                return Response(
+                    200,
+                    json={"results": [_paragraph("Page two")], "has_more": False, "next_cursor": None},
+                )
+            parent = {
+                "object": "block",
+                "type": "paragraph",
+                "has_children": True,
+                "id": child_id,
+                "paragraph": {"rich_text": [{"plain_text": "Parent"}]},
+            }
+            return Response(200, json={"results": [parent], "has_more": True, "next_cursor": "b2"})
+        if path.endswith(f"/v1/blocks/{child_id}/children"):
+            return Response(
+                200,
+                json={"results": [_paragraph("Child line")], "has_more": False, "next_cursor": None},
+            )
+        return Response(404, json={"object": "error", "message": "nope"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
+        )
+    body = response.json()
+    assert "Parent" in body["text"]
+    assert "Child line" in body["text"]
+    assert "Page two" in body["text"]
+
+
+async def test_notion_query_database_cursor_and_limit(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> Response:
+        captured["body"] = json.loads(request.content)
+        return Response(
+            200,
+            json={
+                "results": [
+                    _page_hit(PAGE_ID, "R1", "2026-02-05T00:00:00.000Z"),
+                    _page_hit("44444444444444444444444444444444", "R2", "2026-02-04T00:00:00.000Z"),
+                ],
+                "has_more": True,
+                "next_cursor": "c2",
+            },
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            f"/v1/connectors/notion/databases/{DATABASE_ID}/query",
+            headers=_auth_header(),
+            json={"limit": 1, "page_token": "c0"},
+        )
+    body = response.json()
+    assert captured["body"]["start_cursor"] == "c0"
+    assert [row["title"] for row in body["rows"]] == ["R1"]
+    assert body["next_page_token"] == "c2"
