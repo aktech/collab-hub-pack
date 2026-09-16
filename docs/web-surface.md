@@ -7,14 +7,17 @@ surface** — the OIDC browser session, cookies, CSRF posture, page scaffolding,
 and authorization helpers ([#88]) — and the pages built on it: the
 invitation acceptance page ([#90], `/invite/accept`), the operator
 invitation page ([#91], `/admin/invitations`), the owner invitation page
-([#142], `/web/org/invitations`), and the data statement ([#146],
-`/web/data-statement`).
+([#142], `/web/org/invitations`), the data statement ([#146],
+`/web/data-statement`), and the canonical Terms of Service and Privacy
+Statement ([#95], `/web/terms` and `/web/privacy`).
 
 [#88]: https://github.com/nebari-dev/collab-hub-pack/issues/88
 [#90]: https://github.com/nebari-dev/collab-hub-pack/issues/90
 [#91]: https://github.com/nebari-dev/collab-hub-pack/issues/91
 [#142]: https://github.com/nebari-dev/collab-hub-pack/issues/142
+[#44]: https://github.com/nebari-dev/collab-hub-pack/issues/188
 [#146]: https://github.com/nebari-dev/collab-hub-pack/issues/146
+[#95]: https://github.com/nebari-dev/collab-hub-pack/issues/95
 
 ## Two auth axes, deliberately
 
@@ -307,15 +310,18 @@ a protection the middleware does not itself enforce.
 | `POST /web/signout` | CSRF-protected; clears the session cookie. |
 | `GET /web/signed-out` | Confirmation page. |
 | `GET /web/app.css` | The shared stylesheet (documents keep `style-src 'self'`). |
-| `GET /web/data-statement` | The data statement ([#146]): what is stored, who can see it, and the address deletion requests go to. **Anonymous** — see below. The copy lives in `web/data_statement.py` and the acceptance page renders the same constant above its accept control. |
+| `GET /web/data-statement` | The data statement ([#146]): what is stored, who can see it, and the address deletion requests go to. **Anonymous** — see below. The copy lives in `web/data_statement.py` and the acceptance page renders the same constant above its accept control. Links to the two documents below. |
+| `GET /web/terms` | The canonical Terms of Service ([#95]). **Anonymous** — see below. The copy lives in `web/terms_of_service.py` as one constant; placeholder until counsel replaces it. |
+| `GET /web/privacy` | The canonical Privacy Statement ([#95]). **Anonymous** — see below. The copy lives in `web/privacy_statement.py`, same shape. |
 | `GET /invite/accept` | The acceptance page ([#90]). **Anonymous** — see below. |
 | `POST /invite/accept/redeem` | Redeems the token from a JSON body. Session + CSRF required. |
 | `GET /admin/invitations` | The operator invitation page ([#91]). Session + `operator`. |
 | `POST /admin/invitations` | Issues one invitation and renders its link. Session + `operator` + CSRF. |
 | `POST /admin/invitations/revoke` | Revokes one invitation. Session + `operator` + CSRF. |
 | `GET /web/org/invitations` | The owner invitation page ([#142]). Session + org `owner`. |
-| `POST /web/org/invitations` | Issues one invitation into the caller's org; emails it, or renders the link when no provider is configured. Session + org `owner` + CSRF. |
+| `POST /web/org/invitations` | Issues one invitation into the caller's org and emails it. Refused (409) while the organization still carries the placeholder name ([#44]). Session + org `owner` + CSRF. |
 | `POST /web/org/invitations/revoke` | Revokes one of the caller's org's invitations. Session + org `owner` + CSRF. |
+| `POST /web/org/invitations/name` | Gives a placeholder-named organization its name, once; audited as `org.rename` ([#44]). Session + org `owner` + CSRF. |
 
 The `/admin` paths must be **map-public** in `security.paths`, like the rest of
 this surface, and for the same reason: the map's `authenticated` level runs the
@@ -327,9 +333,15 @@ per request.
 ### Authenticated by default
 
 Every path under a guarded prefix requires a session unless it appears in
-`web.surface.PUBLIC_WEB_PATHS`, which names exactly six: sign-in, the
-callback, the signed-out confirmation, the stylesheet, the acceptance page, and
-the data statement.
+`web.surface.PUBLIC_WEB_PATHS`, which names exactly eight: sign-in, the
+callback, the signed-out confirmation, the stylesheet, the acceptance page,
+the data statement, and the Terms of Service and Privacy Statement.
+
+The last two ([#95]) are linked from the deployment's Keycloak
+terms-acceptance step, which runs *before* Keycloak issues a token — and this
+surface's session is minted from that token. A session gate on them would
+mean the documents could only be read by someone who had already accepted
+them, which is not a stricter policy but an incoherent one.
 That is enforced by a middleware, not by a convention, because the protection
 map cannot supply it — the map's `authenticated` level runs the *API*
 credential check, which a browser mid-sign-in cannot pass, so `/web` must be
@@ -512,6 +524,7 @@ routes:
 | `/admin/invitations/revoke` | [#91], open | same |
 | `/web/org/invitations` | [#142] | `web.forms.csrf_ok()` → `csrf_token_matches`, as a predicate |
 | `/web/org/invitations/revoke` | [#142] | same |
+| `/web/org/invitations/name` | [#44] | same |
 
 The check and the routes land in **different changes**, and that is the whole
 argument. Split across both — an empty set here, a route there with no
@@ -543,7 +556,7 @@ An entry naming a path with **no** mounted route is tolerated, deliberately,
 and that tolerance is load-bearing twice over. Two of the three shipped entries
 name routes #91 has not landed, so a check requiring every entry to be mounted
 would refuse to start this branch. And after #91 lands it still matters:
-`make_app` mounts the operator router only when `org_source_is_membership()`,
+`make_app` mounts the operator router only when `org_source_resolves_membership()`,
 so on a claims-sourced deployment those routes are legitimately absent while
 the entries are correctly present, and failing on absence would refuse every
 such deployment. That leaves a typo inert, and the cost is
@@ -962,6 +975,69 @@ advisory lock (one live invitation per address, issued from this page),
 notices, no JavaScript, render-not-redirect on the POSTs, and the same
 mounting rule — claims-sourced deployments have no org roles, so the page is
 absent there rather than a page that refuses everyone.
+
+### The first-invite naming step ([#44])
+
+Every organization starts with the neutral placeholder name — `collab_orgs.name`
+defaults to `'Unnamed organization'` and accepting an org-creating invitation
+never supplies one (Gate B revision of 2026-08-04). So the first owner to reach
+this page owns an unnamed organization, and the page identifies the destination
+of every invitation they issue only as "Unnamed organization". [#92] specified
+a rename → invite sequence for exactly this; [#142] shipped without it, and the
+live hub showed the consequence on 2026-08-25.
+
+**Scope: the owner's side only.** The invitation email is organization-neutral
+by decision — `render_invitation_email()` discards `organization_name`, and a
+regression in `test_invitation_email.py` pins that the name appears in neither
+subject nor body. This step does not change that. What it changes is that an
+owner has named, and can see, the organization they are inviting people into
+before the first invitation leaves; the name lives on this page, on the
+organization's record, and on the `org.rename` audit row. The delivery adapter
+still receives the resolved name (as it always did) and the renderer's
+treatment of it remains the renderer's decision.
+
+The page now branches on `is_placeholder_organization_name()`:
+
+- **While the placeholder stands**, the issue form is not rendered; a naming
+  form (`organization_name`, ≤ 120 characters) posts to
+  `/web/org/invitations/name`, and `POST /web/org/invitations` answers **409**
+  with a fixed notice for any submission that passes the page's ordinary
+  request checks (bounded body, CSRF, a valid address) — before the audited
+  issue action and before the mail seam. A submission that fails those checks
+  is answered the way it always was (413/403/400), so no body shape reaches
+  issuance. The server refuses; the missing form is the honest rendering of
+  that refusal, not the enforcement.
+- **Naming is one shot.** `name_organization()` reads the current name
+  `FOR UPDATE` inside the audited transaction and refuses
+  (`OrganizationAlreadyNamedError`, 409 on the page) unless it is still the
+  placeholder. Two owners naming at once resolve to one `org.rename` row and one
+  refusal; a stale tab cannot overwrite a chosen name. Changing a name that was
+  already chosen is a different action for a different surface — an operator
+  today, by hand — and this page does not offer it.
+- **The row.** `org.rename`, actor = the owner, target = the organization, and
+  the new name as `target_label`, written by `audited()` like every other
+  mutation here; page code writes nothing. The name itself never reaches a log
+  line — the log carries the owner and the org id.
+- **The name is validated as display text**: stripped, non-empty, ≤ 120
+  characters, one line by Unicode category (every `Cc` control including the
+  C1 block, the `Zl`/`Zp` separators, and `Cf` format characters such as the
+  bidi overrides are refused — wider than the audit primitive's ASCII-only
+  rule, so nothing accepted here is refused there), whitespace-normalized
+  (every Unicode space separator becomes one ASCII space, runs collapse) with
+  at least one letter or digit (so a Braille blank, combining marks alone, or
+  bare punctuation cannot be a name), and not the placeholder in any ASCII
+  capitalization or spacing — typing "Unnamed organization" would satisfy the
+  check while leaving the owner exactly as uninformed.
+
+Once named, the page is what [#142] shipped: the issue form, the org's name in
+the intro, and the listing.
+
+Before (shipped [#142], placeholder-named org) · after (naming form) · after
+naming:
+
+![Before: the issue form offered "Invite someone to join Unnamed organization"](images/owner-invitations/44-before-placeholder-issue-form.png)
+![After: the naming form replaces the issue form while the placeholder stands](images/owner-invitations/44-after-naming-form.png)
+![After naming: the confirmation notice and the issue form for "Acme Widgets"](images/owner-invitations/44-after-named.png)
 
 ## What this surface deliberately does not do
 
