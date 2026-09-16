@@ -6,6 +6,7 @@ import pytest
 from collab_hub_execution import (
     ERROR_CODES,
     DurableWorkflowEngine,
+    EnvelopeError,
     EnvelopeInvalid,
     InMemoryCogExecutor,
     InMemoryTrackStore,
@@ -68,7 +69,10 @@ def test_unknown_fields_are_ignored_at_every_level():
     {"envelope": 1, "ok": "yes"},
     {"envelope": 1, "ok": False},              # a failure with no reason
     {"envelope": 1, "ok": False, "error": {"detail": "no code"}},
-    {"envelope": 1, "ok": True, "error": {"code": "invalid-input"}},  # a contradiction
+    {"envelope": 1, "ok": False, "error": {"code": "invalid-input"}},  # no detail
+    {"envelope": 1, "ok": False, "error": {"code": "invalid-input", "detail": None}},
+    {"envelope": 1, "ok": False, "error": {"code": "made-up", "detail": "x"}},  # outside the closed set
+    {"envelope": 1, "ok": True, "error": {"code": "invalid-input", "detail": "x"}},  # a contradiction
     {"envelope": 1, "ok": True, "problems": {"check": "schema"}},
     {"envelope": 1, "ok": True, "problems": [{"detail": "no check"}]},
     {"envelope": 1, "ok": True, "problems": [{"check": "schema", "severity": "fatal"}]},
@@ -79,6 +83,34 @@ def test_unknown_fields_are_ignored_at_every_level():
 def test_non_envelopes_are_refused(data):
     with pytest.raises(EnvelopeInvalid):
         ResultEnvelope.parse(data)
+
+
+@pytest.mark.parametrize("build", [
+    lambda: ResultEnvelope(ok=False),                                              # a failure with no reason
+    lambda: ResultEnvelope(ok=True, error=EnvelopeError("invalid-input", "x")),   # a contradiction
+    lambda: ResultEnvelope(ok=True, envelope=2),
+    lambda: ResultEnvelope(ok="yes"),
+    lambda: ResultEnvelope(ok=True, problems=(object(),)),
+    lambda: ResultEnvelope(ok=True, binding="not-an-object"),
+    lambda: ResultEnvelope.failure("made-up", "x"),
+    lambda: EnvelopeError("invalid-input", None),
+    lambda: Problem("schema", "d", "fatal"),
+    lambda: Problem("", "d"),
+])
+def test_a_directly_built_envelope_obeys_the_same_invariants_as_a_parsed_one(build):
+    with pytest.raises(EnvelopeInvalid):
+        build()
+
+
+def test_a_worker_that_builds_an_invalid_envelope_fails_durably_not_crashing_the_engine():
+    class Worker:
+        def interact(self, entry_point, input=None, idempotency_key=None):
+            return ResultEnvelope(ok=False)  # would have reached error.code with error None
+
+    track = InMemoryTrackStore()
+    assert DurableWorkflowEngine(executor=LocalExecutor(Worker()), track=track).submit(op()) is RunStatus.FAILED
+    failed = events(track, "env", "failed")[-1].payload
+    assert failed["error"] == "EnvelopeInvalid" and "ok: false requires error" in failed["reason"]
 
 
 def test_to_dict_round_trips_through_parse():
@@ -251,6 +283,11 @@ def test_other_statuses_are_not_envelopes(status):
     worker = http_worker(lambda _: httpx.Response(status, json={"envelope": 1, "ok": True}))
     with pytest.raises((httpx.HTTPStatusError, EnvelopeInvalid)):
         worker.interact("run", "x")
+
+
+def test_http_envelope_with_an_unknown_pause_field_is_an_envelope_not_a_pause():
+    worker = http_worker(lambda _: httpx.Response(200, json={"envelope": 1, "ok": True, "payload": "p", "pause": True}))
+    assert worker.interact("run", "x") == ResultEnvelope.success("p")
 
 
 def test_http_pause_answer_is_still_a_pause_until_gates_move_to_the_step():

@@ -49,20 +49,43 @@ class Problem:
     detail: str
     severity: str = "error"
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.check, str) or not self.check:
+            raise EnvelopeInvalid("problem.check must be a non-empty string")
+        if not isinstance(self.detail, str):
+            raise EnvelopeInvalid("problem.detail must be a string")
+        if self.severity not in SEVERITIES:
+            raise EnvelopeInvalid(f"problem.severity must be one of {SEVERITIES}")
+
 
 @dataclass(frozen=True, slots=True)
 class EnvelopeError:
-    """Why ``ok`` is false: a code from ``ERROR_CODES`` and a human sentence."""
+    """Why ``ok`` is false: one of ``ERROR_CODES`` and a human sentence.
+
+    The code set is closed for version 1 — it is what a client acts on, so an
+    invented code is an invalid envelope, not a new kind of failure.
+    """
 
     code: str
-    detail: str = ""
+    detail: str
+
+    def __post_init__(self) -> None:
+        if self.code not in ERROR_CODES:
+            raise EnvelopeInvalid(f"error.code must be one of {sorted(ERROR_CODES)}, not {self.code!r}")
+        if not isinstance(self.detail, str):
+            raise EnvelopeInvalid("error.detail must be a string")
 
 
 @dataclass(frozen=True, slots=True)
 class ResultEnvelope:
-    """A parsed envelope. ``usage`` is kept as reported; the engine validates it
-    against the run's budget, so a malformed report fails the run as unknown
-    spending rather than being silently dropped here."""
+    """An envelope the hub can act on. ``usage`` is kept as reported; the engine
+    validates it against the run's budget, so a malformed report fails the run
+    as unknown spending rather than being silently dropped here.
+
+    The invariants are checked on construction, not only in ``parse``, so an
+    envelope a worker builds in process obeys the same contract as one that
+    arrived as JSON — and the engine can trust any ``ResultEnvelope`` it holds.
+    """
 
     ok: bool
     payload: Any = None
@@ -75,6 +98,26 @@ class ResultEnvelope:
     task: str | None = None
     timing: Mapping[str, Any] | None = None
     envelope: int = field(default=ENVELOPE_VERSION)
+
+    def __post_init__(self) -> None:
+        if type(self.envelope) is not int or self.envelope != ENVELOPE_VERSION:
+            raise EnvelopeInvalid(f"unsupported envelope version {self.envelope!r}; this hub reads {ENVELOPE_VERSION}")
+        if type(self.ok) is not bool:
+            raise EnvelopeInvalid("ok must be a boolean")
+        if self.error is not None and not isinstance(self.error, EnvelopeError):
+            raise EnvelopeInvalid("error must be null or an EnvelopeError")
+        if not self.ok and self.error is None:
+            raise EnvelopeInvalid("ok: false requires error {code, detail}")
+        if self.ok and self.error is not None:
+            raise EnvelopeInvalid("ok: true cannot carry an error")
+        if isinstance(self.problems, list):
+            object.__setattr__(self, "problems", tuple(self.problems))
+        if not isinstance(self.problems, tuple) or not all(isinstance(p, Problem) for p in self.problems):
+            raise EnvelopeInvalid("problems must be Problem entries")
+        for name in ("binding", "cog", "timing"):
+            _optional_mapping(getattr(self, name), name)
+        for name in ("raw", "task"):
+            _optional_str(getattr(self, name), name)
 
     @classmethod
     def success(
@@ -120,35 +163,27 @@ class ResultEnvelope:
         Raises ``EnvelopeInvalid`` for anything that is not an envelope: a
         missing or unsupported ``envelope`` version, a non-boolean ``ok``, an
         ``ok: false`` with no ``error`` (an unexplained failure) or an
-        ``ok: true`` with one (a contradiction), and malformed ``problems``.
-        ``usage`` is passed through for the engine's budget rules.
+        ``ok: true`` with one (a contradiction), an ``error`` without both
+        ``code`` and ``detail`` or with a code outside ``ERROR_CODES``, and
+        malformed ``problems``. ``usage`` is passed through for the engine's
+        budget rules.
         """
         if not isinstance(data, Mapping):
             raise EnvelopeInvalid("a result envelope is a JSON object")
-        version = data.get("envelope")
-        if version is None:
+        if data.get("envelope") is None:
             raise EnvelopeInvalid("missing envelope version")
-        if type(version) is not int or version != ENVELOPE_VERSION:
-            raise EnvelopeInvalid(f"unsupported envelope version {version!r}; this hub reads {ENVELOPE_VERSION}")
-        ok = data.get("ok")
-        if type(ok) is not bool:
-            raise EnvelopeInvalid("ok must be a boolean")
-        error = _parse_error(data.get("error"))
-        if not ok and error is None:
-            raise EnvelopeInvalid("ok: false requires error {code, detail}")
-        if ok and error is not None:
-            raise EnvelopeInvalid("ok: true cannot carry an error")
         return cls(
-            ok=ok,
+            ok=data.get("ok"),
             payload=data.get("payload"),
             problems=_parse_problems(data.get("problems")),
-            error=error,
-            binding=_optional_mapping(data.get("binding"), "binding"),
+            error=_parse_error(data.get("error")),
+            binding=data.get("binding"),
             usage=data.get("usage"),
-            raw=_optional_str(data.get("raw"), "raw"),
-            cog=_optional_mapping(data.get("cog"), "cog"),
-            task=_optional_str(data.get("task"), "task"),
-            timing=_optional_mapping(data.get("timing"), "timing"),
+            raw=data.get("raw"),
+            cog=data.get("cog"),
+            task=data.get("task"),
+            timing=data.get("timing"),
+            envelope=data.get("envelope"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,15 +208,12 @@ def _parse_error(value: Any) -> EnvelopeError | None:
         return None
     if not isinstance(value, Mapping):
         raise EnvelopeInvalid("error must be null or {code, detail}")
-    code = value.get("code")
-    if not isinstance(code, str) or not code:
-        raise EnvelopeInvalid("error.code must be a non-empty string")
-    detail = value.get("detail", "")
-    if detail is None:
-        detail = ""
-    if not isinstance(detail, str):
-        raise EnvelopeInvalid("error.detail must be a string")
-    return EnvelopeError(code, detail)
+    if "code" not in value or "detail" not in value:
+        raise EnvelopeInvalid("error needs both code and detail")
+    code = value["code"]
+    if not isinstance(code, str):
+        raise EnvelopeInvalid("error.code must be a string")
+    return EnvelopeError(code, value["detail"])  # validates the code and the detail
 
 
 def _parse_problems(value: Any) -> tuple[Problem, ...]:
@@ -193,14 +225,8 @@ def _parse_problems(value: Any) -> tuple[Problem, ...]:
     for item in value:
         if not isinstance(item, Mapping):
             raise EnvelopeInvalid("each problem is {check, detail, severity}")
-        check, detail, severity = item.get("check"), item.get("detail", ""), item.get("severity", "error")
-        if not isinstance(check, str) or not check:
-            raise EnvelopeInvalid("problem.check must be a non-empty string")
-        if not isinstance(detail, str):
-            raise EnvelopeInvalid("problem.detail must be a string")
-        if severity not in SEVERITIES:
-            raise EnvelopeInvalid(f"problem.severity must be one of {SEVERITIES}")
-        problems.append(Problem(check, detail, severity))
+        # Problem validates its own fields.
+        problems.append(Problem(item.get("check"), item.get("detail", ""), item.get("severity", "error")))
     return tuple(problems)
 
 

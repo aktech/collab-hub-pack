@@ -40,8 +40,12 @@ as `EnvelopeInvalid`. In-memory handlers return a `ResultEnvelope` or an
 envelope-shaped mapping; any other value becomes the payload of a successful
 envelope with unknown usage.
 
-`ok: false` needs `error: {code, detail}`: the step fails, and the Track's
-`failed` event keeps the code as its `error` and the detail as its `reason`.
+`ok: false` needs `error: {code, detail}`, with the code one of the five the
+envelope document lists — any other code is an invalid envelope, not a new
+kind of failure. The step fails, and the Track's `failed` event keeps the code
+as its `error` and the detail as its `reason`. These rules hold on construction
+as well as on parsing, so an envelope a worker builds in process cannot
+sidestep them.
 `ok: true` with a non-empty `problems` list is **not** a failure: the step
 completes, and the problems are recorded on `step_completed` for a Gate to
 decide — step-declared Gates are #99. A `binding`, when the worker reports one,

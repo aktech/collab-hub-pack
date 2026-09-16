@@ -414,9 +414,11 @@ class _KubernetesWorker:
         status = response.status_code
         body = self._decoded(response)
         if status == 200:
-            if isinstance(body, dict) and body.get("pause") is True:
+            if isinstance(body, dict) and "envelope" not in body and body.get("pause") is True:
                 # Transitional (see PauseRequest): the reference worker still asks
-                # to pause. Step-declared Gates (#99) retire this answer.
+                # to pause, with an answer that is not an envelope. Step-declared
+                # Gates (#99) retire it. An envelope that happens to carry a
+                # `pause` field is an envelope with an unknown field, ignored.
                 raise PauseRequest(body.get("reason", "cog requested a pause"), usage=body.get("usage"))
             return ResultEnvelope.parse(body)
         if status in CODE_FOR_STATUS:
