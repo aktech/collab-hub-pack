@@ -52,7 +52,7 @@ const TITLES: Record<SectionKey, string> = {
 export function App() {
   const [result, setResult] = useState<SessionResult | null>(null);
   const [section, setSection] = useState<SectionKey>(sectionFromHash());
-  const [theme, setTheme] = useState<Theme>(() => readTheme(window.localStorage, systemPrefersDark()));
+  const [theme, setTheme] = useState<Theme>(() => readTheme(() => window.localStorage, systemPrefersDark()));
 
   // Applied as an effect rather than during render: touching the document is a
   // side effect, and React may render more than once before it commits.
@@ -60,9 +60,16 @@ export function App() {
     applyTheme(document.documentElement, theme);
   }, [theme]);
 
+  // The back and forward buttons change only the fragment; follow them.
+  useEffect(() => {
+    const follow = () => setSection(sectionFromHash());
+    window.addEventListener("hashchange", follow);
+    return () => window.removeEventListener("hashchange", follow);
+  }, []);
+
   function toggleTheme() {
     const chosen = nextTheme(theme);
-    storeTheme(window.localStorage, chosen);
+    storeTheme(() => window.localStorage, chosen);
     setTheme(chosen);
   }
 

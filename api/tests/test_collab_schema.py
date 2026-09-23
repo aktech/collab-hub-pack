@@ -46,6 +46,7 @@ from collab_hub_api.frames.collab_schema import (  # noqa: E402
 )
 
 COLLAB_TABLES = (
+    "collab_connector_state",
     "collab_service_access_grants",
     "collab_provisioned_accounts",
     "collab_invitations",

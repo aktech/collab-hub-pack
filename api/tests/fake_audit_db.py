@@ -53,6 +53,9 @@ class FakeAuditConnection:
     # (connection=None simply means "no connection settings": UTF-8).
     connection = None
     adapters = psycopg.adapters
+    # A real cursor reports how many rows the last write touched; the double
+    # answers "one", which is what a write that was not suppressed reports.
+    rowcount = 1
 
     def __init__(self, rows=()):
         self.statements: list[tuple[str, tuple | None]] = []

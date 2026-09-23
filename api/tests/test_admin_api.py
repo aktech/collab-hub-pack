@@ -657,6 +657,32 @@ async def test_an_operator_can_grant_and_revoke_the_role(tmp_path, idp: _StubIdp
     assert admin.calls == [("grant", "u-2"), ("revoke", "u-2")]
 
 
+class RefusingRoleAdmin(RecordingRoleAdmin):
+    def revoke(self, actor, *, user_id, user_label=None):
+        from collab_hub_api.frames.platform_role_admin import PlatformRoleChangeRefused
+
+        raise PlatformRoleChangeRefused("last_operator")
+
+
+@pytest.mark.asyncio
+async def test_a_revoke_that_would_strand_the_deployment_is_a_conflict(tmp_path, idp: _StubIdp):
+    """The panel gets a reason it can show, not a 500."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.platform_role_admin = RefusingRoleAdmin()
+        response = await client.post(
+            "/admin/api/users/u-2/role",
+            json={"action": "revoke"},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "last_operator"}
+
+
 @pytest.mark.asyncio
 async def test_a_role_change_without_a_csrf_token_is_refused(tmp_path, idp: _StubIdp):
     app = build_app(tmp_path, idp)
@@ -687,6 +713,49 @@ async def test_the_users_listing_says_where_each_role_came_from(tmp_path, idp: _
         body = (await client.get("/admin/api/users")).json()
 
     assert body["users"][0]["role_source"] == "manual"
+
+
+@pytest.mark.asyncio
+async def test_the_users_listing_reads_every_role_at_once(tmp_path, idp: _StubIdp):
+    """One read for the page, not two per person: a 200-row page used to be up
+    to 400 database round trips."""
+
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        store = app.state.org_store
+        grant_operator(app, idp.sub)
+        store.set_platform_role("u-2")
+        store.set_platform_role("u-3", "operator", "active", "idp")
+        store.set_platform_role("u-4", "operator", "revoked", "idp")
+        app.state.user_directory_client = StubDirectory(
+            [
+                UserDirectoryUser(id=user_id, username=user_id, email=None)
+                for user_id in ("u-2", "u-3", "u-4", "u-5")
+            ]
+        )
+        await sign_in(client, idp, next_path="/web")
+
+        per_person: list[str] = []
+        for name in ("resolve_principal", "get_platform_role_row"):
+            original = getattr(store, name)
+
+            def spy(user_id, _original=original):
+                per_person.append(user_id)
+                return _original(user_id)
+
+            setattr(store, name, spy)
+        body = (await client.get("/admin/api/users")).json()
+
+    assert {row["id"]: (row["role"], row["role_source"]) for row in body["users"]} == {
+        "u-2": ("operator", "manual"),
+        "u-3": ("operator", "idp"),
+        "u-4": (None, None),
+        "u-5": (None, None),
+    }
+    assert not {"u-2", "u-3", "u-4", "u-5"} & set(per_person)
 
 
 class RecordingConnectorStore:

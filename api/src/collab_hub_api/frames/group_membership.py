@@ -46,12 +46,14 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
 __all__ = ["GroupMember", "GroupMembershipClient", "GroupMembershipError"]
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+MEMBER_PAGE_SIZE = 500
 
 
 class GroupMembershipError(RuntimeError):
@@ -96,32 +98,58 @@ class GroupMembershipClient:
         return bool(self._token_url and self._base_url and self._client_id and self._group_ids)
 
     def list_members(self, group_path: str) -> list[GroupMember]:
+        """Every member, read page by page until Keycloak returns a short one."""
+
         group_id = self._group_id(group_path)
-        payload = self._request("GET", f"/groups/{group_id}/members", params={"max": 500})
-        if not isinstance(payload, list):
-            raise GroupMembershipError("Keycloak returned an unrecognized member listing")
-        return [
-            GroupMember(
-                id=str(entry.get("id")),
-                username=entry.get("username"),
-                email=entry.get("email"),
+        members: list[GroupMember] = []
+        first = 0
+        while True:
+            payload = self._request(
+                "GET",
+                f"/groups/{group_id}/members",
+                params={"first": first, "max": MEMBER_PAGE_SIZE},
             )
-            for entry in payload
-            if isinstance(entry, dict) and entry.get("id")
-        ]
+            if not isinstance(payload, list):
+                raise GroupMembershipError("Keycloak returned an unrecognized member listing")
+            members.extend(
+                GroupMember(
+                    id=str(entry.get("id")),
+                    username=entry.get("username"),
+                    email=entry.get("email"),
+                )
+                for entry in payload
+                if isinstance(entry, dict) and entry.get("id")
+            )
+            if len(payload) < MEMBER_PAGE_SIZE:
+                return members
+            first += MEMBER_PAGE_SIZE
 
     def add_member(self, *, user_id: str, group_path: str) -> None:
         """Idempotent at the provider: adding an existing member is a no-op."""
 
-        self._request("PUT", f"/users/{user_id}/groups/{self._group_id(group_path)}")
+        self._request("PUT", self._membership_path(user_id, group_path))
 
     def remove_member(self, *, user_id: str, group_path: str) -> None:
         """Also idempotent: removing somebody who is not a member succeeds."""
 
-        self._request("DELETE", f"/users/{user_id}/groups/{self._group_id(group_path)}")
+        self._request("DELETE", self._membership_path(user_id, group_path))
 
     def close(self) -> None:
         self._client.close()
+
+    def _membership_path(self, user_id: str, group_path: str) -> str:
+        """The one endpoint this client writes to, with *user_id* as one segment.
+
+        The id is caller input, so it is encoded rather than trusted: a ``#``
+        would otherwise cut the path at ``/users/<id>`` and turn the membership
+        DELETE into Keycloak's delete-user call, and a ``/`` or ``?`` would
+        reach other admin endpoints. Encoding leaves dots alone, so the dot
+        segments are refused outright.
+        """
+
+        if user_id in ("", ".", ".."):
+            raise GroupMembershipError(f"{user_id!r} is not a user id")
+        return f"/users/{quote(user_id, safe='')}/groups/{self._group_id(group_path)}"
 
     def _group_id(self, group_path: str) -> str:
         """The configured id for *group_path*, refusing anything unmanaged.

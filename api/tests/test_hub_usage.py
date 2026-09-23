@@ -103,3 +103,19 @@ def test_the_postgres_summary_asks_the_database_to_count_rather_than_streaming_r
     assert summary.users_total == 7
     assert any("count(DISTINCT user_id)" in sql for sql in statements)
     assert not any("SELECT user_id, email" in sql for sql in statements)
+
+
+def test_the_window_is_half_open_like_the_database_query(monkeypatch):
+    """``since`` is inclusive and ``until`` exclusive, as Postgres runs it, so
+    adjacent windows never count one event twice and this store cannot hide a
+    boundary bug the production one would show."""
+
+    from collab_hub_api.frames import usage
+
+    instant = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(usage, "_now", lambda: instant)
+    store = InMemoryUsageStore()
+    store.record_event("org-a", "default", "u-1", "chat")
+
+    assert store.hub_summary(since=instant).events_total == 1
+    assert store.hub_summary(until=instant).events_total == 0

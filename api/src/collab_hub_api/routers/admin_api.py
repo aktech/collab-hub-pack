@@ -53,6 +53,7 @@ from ..frames.invitations import (
     effective_status,
 )
 from ..frames.model_catalog import ModelCatalogError
+from ..frames.platform_role_admin import PlatformRoleChangeRefused
 from ..frames.usage import UsageStore, UsageUnavailableError
 from ..user_directory import UserDirectoryClient, UserDirectoryUnavailableError
 from ..web.authz import require_csrf, require_operator, resolve_platform_role
@@ -67,22 +68,17 @@ DEFAULT_PAGE_SIZE = 50
 INVITATION_LISTING_LIMIT = 100
 
 
-def _role_source(request: Request, user_id: str) -> str | None:
-    """Where this person's role came from, or ``None`` if they hold none.
+def _active_role_rows(request: Request, user_ids: list[str]) -> dict[str, dict]:
+    """The *active* role rows for a page of people, read in one round trip.
 
-    Read through the org store rather than recomputed, so the panel and the
-    authorization path agree about what the row says.
+    Read through the org store, the same table the authorization path reads,
+    so the panel and the request path agree about who is an operator. A
+    revoked row is dropped here: it grants nothing, so it shows as no role.
     """
 
-    store = getattr(request.app.state, "org_store", None)
-    reader = getattr(store, "get_platform_role_row", None)
-    if reader is None:
-        return None
-    try:
-        row = reader(user_id)
-    except Exception:
-        return None
-    return row["source"] if row and row["status"] == "active" else None
+    store = request.app.state.org_store
+    rows = store.get_platform_role_rows(user_ids)
+    return {user_id: row for user_id, row in rows.items() if row["status"] == "active"}
 
 
 def _running_version() -> str:
@@ -396,14 +392,15 @@ def make_router() -> APIRouter:
         except UserDirectoryUnavailableError:
             return JSONResponse({"error": "user_directory_unavailable"}, status_code=503)
 
+        roles = _active_role_rows(request, [person.id for person in people])
         return {
             "users": [
                 {
                     "id": person.id,
                     "username": person.username,
                     "email": person.email,
-                    "role": resolve_platform_role(request, person.id),
-                    "role_source": _role_source(request, person.id),
+                    "role": roles.get(person.id, {}).get("role"),
+                    "role_source": roles.get(person.id, {}).get("source"),
                 }
                 for person in people
             ],
@@ -431,7 +428,10 @@ def make_router() -> APIRouter:
             return JSONResponse({"error": "role_management_unavailable"}, status_code=503)
 
         change = admin.grant if body.action == "grant" else admin.revoke
-        change(actor, user_id=user_id, user_label=body.user_label)
+        try:
+            change(actor, user_id=user_id, user_label=body.user_label)
+        except PlatformRoleChangeRefused as exc:
+            return JSONResponse({"error": exc.reason}, status_code=409)
         return {"ok": True, "action": body.action}
 
     @router.get("/connectors")

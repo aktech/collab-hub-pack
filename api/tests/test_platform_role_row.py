@@ -32,8 +32,8 @@ class Connection:
         self.statements.append((" ".join(str(sql).split()), params))
         return self
 
-    def fetchone(self):
-        return self._row
+    def fetchall(self):
+        return [] if self._row is None else [{"user_id": "u-1", **self._row}]
 
 
 class Database:
@@ -53,8 +53,8 @@ def test_the_row_comes_back_with_the_source_that_decides_who_may_change_it():
         "source": "idp",
     }
     (sql, params) = db.conn.statements[0]
-    assert "FROM collab_platform_roles WHERE user_id = %s" in sql
-    assert params == ("u-1",)
+    assert "FROM collab_platform_roles WHERE user_id = ANY(%s)" in sql
+    assert params == (["u-1"],)
 
 
 def test_somebody_with_no_row_reads_as_none():

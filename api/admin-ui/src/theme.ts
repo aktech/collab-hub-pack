@@ -9,7 +9,8 @@
  * The choice lives in `localStorage`, which is per-browser and never reaches
  * the server. Every access is wrapped: a private window or blocked site data
  * throws on access rather than returning null, and a colour scheme is never
- * worth failing a render over.
+ * worth failing a render over. Storage is passed as a getter because reading
+ * `window.localStorage` is itself the access that throws.
  */
 
 export type Theme = "light" | "dark";
@@ -20,10 +21,10 @@ function isTheme(value: unknown): value is Theme {
   return value === "light" || value === "dark";
 }
 
-export function readTheme(store: Storage, systemPrefersDark: boolean): Theme {
+export function readTheme(store: () => Storage, systemPrefersDark: boolean): Theme {
   let stored: string | null = null;
   try {
-    stored = store.getItem(THEME_KEY);
+    stored = store().getItem(THEME_KEY);
   } catch {
     stored = null;
   }
@@ -31,9 +32,9 @@ export function readTheme(store: Storage, systemPrefersDark: boolean): Theme {
   return systemPrefersDark ? "dark" : "light";
 }
 
-export function storeTheme(store: Storage, theme: Theme): void {
+export function storeTheme(store: () => Storage, theme: Theme): void {
   try {
-    store.setItem(THEME_KEY, theme);
+    store().setItem(THEME_KEY, theme);
   } catch {
     // The toggle still works for this page view; it just will not be
     // remembered. Refusing to switch would be the worse failure.

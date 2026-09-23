@@ -96,5 +96,12 @@ export async function postJson(
     return { state: "refused", reason: await reason(response) };
   }
   if (!response.ok) return { state: "error" };
-  return { state: "ok", data: null };
+  // A success can still carry news -- an invitation created whose email did
+  // not go out is a 201 -- so the body is handed back rather than dropped.
+  try {
+    const text = await response.text();
+    return { state: "ok", data: text ? (JSON.parse(text) as unknown) : null };
+  } catch {
+    return { state: "ok", data: null };
+  }
 }

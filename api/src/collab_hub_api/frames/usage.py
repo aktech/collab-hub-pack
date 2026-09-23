@@ -97,11 +97,14 @@ class UsageEventCount:
 
 
 def _within(at: datetime, since: datetime | None, until: datetime | None) -> bool:
-    """Whether *at* falls inside an optionally open-ended window."""
+    """Whether *at* falls inside ``[since, until)``, either end optional.
+
+    Half-open, matching the Postgres queries (``>= since``, ``< until``).
+    """
 
     if since is not None and at < since:
         return False
-    if until is not None and at > until:
+    if until is not None and at >= until:
         return False
     return True
 
@@ -399,9 +402,7 @@ class InMemoryUsageStore(UsageStore):
             for entry in self._events:
                 if entry.org_id != org_id or entry.workspace_id != workspace_id:
                     continue
-                if since is not None and entry.created_at < since:
-                    continue
-                if until is not None and entry.created_at >= until:
+                if not _within(entry.created_at, since, until):
                     continue
                 key = (entry.event, entry.user)
                 counts[key] = counts.get(key, 0) + 1

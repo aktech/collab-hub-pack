@@ -103,3 +103,58 @@ def test_a_refusal_from_keycloak_is_reported_rather_than_swallowed():
 
     with pytest.raises(GroupMembershipError):
         membership(token_or(handler)).add_member(user_id="u-1", group_path="/llm")
+
+
+@pytest.mark.parametrize("user_id", ["u-9#", "u-9?x=", "../../groups/g-2", "a/b", "u-9%23"])
+def test_a_user_id_cannot_steer_the_request_off_the_membership_endpoint(user_id):
+    """The id is caller input. Whatever it contains, it names one path segment:
+    a ``#`` that dropped the rest of the path would turn the membership DELETE
+    into Keycloak's delete-user call."""
+
+    seen: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.raw_path))
+        return httpx.Response(204)
+
+    client = membership(token_or(handler))
+    client.add_member(user_id=user_id, group_path="/llm")
+    client.remove_member(user_id=user_id, group_path="/llm")
+
+    for method, raw_path in seen:
+        prefix, _, rest = raw_path.partition(b"/users/")
+        assert prefix == b"/admin/realms/nebari", (method, raw_path)
+        segment, suffix = rest.split(b"/", 1)
+        assert suffix == b"groups/g-1", (method, raw_path)
+        assert b"?" not in raw_path and b"#" not in raw_path, (method, raw_path)
+
+
+@pytest.mark.parametrize("user_id", ["", ".", ".."])
+def test_a_user_id_that_is_not_a_path_segment_is_refused_before_any_call(user_id):
+    """Encoding leaves dots alone, and a bare ``..`` would climb out of
+    ``/users/``: those are refused rather than sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no request may be made for {user_id!r}")
+
+    client = membership(token_or(handler))
+    with pytest.raises(GroupMembershipError):
+        client.add_member(user_id=user_id, group_path="/llm")
+    with pytest.raises(GroupMembershipError):
+        client.remove_member(user_id=user_id, group_path="/llm")
+
+
+def test_a_group_larger_than_one_page_comes_back_whole():
+    """Keycloak pages member listings; a roster cut at the first page would be
+    shown to an administrator as if it were complete."""
+
+    everyone = [{"id": f"u-{n}", "username": f"user{n}", "email": None} for n in range(1203)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        first = int(request.url.params.get("first", "0"))
+        size = int(request.url.params["max"])
+        return httpx.Response(200, json=everyone[first : first + size])
+
+    members = membership(token_or(handler)).list_members("/llm")
+
+    assert [m.id for m in members] == [entry["id"] for entry in everyone]

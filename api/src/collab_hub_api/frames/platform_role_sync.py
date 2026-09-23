@@ -200,27 +200,20 @@ class PostgresPlatformRoleSync(_PlatformRoleSync):
             ).fetchone()
 
     def _grant(self, *, user_id: str, display: DisplayIdentity) -> None:
-        with audited(
-            self._db,
-            _actor(user_id, display),
+        # An upsert, not an insert: a grant is just as often the *return*
+        # of someone whose synced row was revoked when they left the group,
+        # and ``user_id`` is the primary key, so a plain insert would fail
+        # on exactly the second-most-common case this path serves.
+        #
+        # The ``WHERE`` on the update arm is the same guard the revoke
+        # carries, for the same reason: the row was read on a different
+        # connection, so a hand-run grant or revocation landing in between
+        # must survive a decision taken against the row as it used to be.
+        self._write(
             AUDIT_ACTION_PLATFORM_ROLE_GRANT,
-            target_type="user",
-            target_id=user_id,
-            target_label=display.email or display.name,
-            org_id=None,
-            detail={"origin": "oidc", "group": self._admin_group},
-        ) as event:
-            # An upsert, not an insert: a grant is just as often the *return*
-            # of someone whose synced row was revoked when they left the group,
-            # and ``user_id`` is the primary key, so a plain insert would fail
-            # on exactly the second-most-common case this path serves.
-            #
-            # The ``WHERE`` on the update arm is the same guard the revoke
-            # carries, for the same reason: the row was read on a different
-            # connection, so a hand-run grant or revocation landing in between
-            # must survive a decision taken against the row as it used to be.
-            event.conn.execute(
-                """
+            user_id=user_id,
+            display=display,
+            sql="""
                 INSERT INTO collab_platform_roles (user_id, role, status, source)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (user_id) DO UPDATE
@@ -229,43 +222,64 @@ class PostgresPlatformRoleSync(_PlatformRoleSync):
                        granted_at = now()
                  WHERE collab_platform_roles.source = %s
                 """,
-                (
-                    user_id,
-                    PLATFORM_ROLE_OPERATOR,
-                    PLATFORM_ROLE_ACTIVE,
-                    PLATFORM_ROLE_SOURCE_IDP,
-                    PLATFORM_ROLE_SOURCE_IDP,
-                ),
-            )
+            params=(
+                user_id,
+                PLATFORM_ROLE_OPERATOR,
+                PLATFORM_ROLE_ACTIVE,
+                PLATFORM_ROLE_SOURCE_IDP,
+                PLATFORM_ROLE_SOURCE_IDP,
+            ),
+        )
 
     def _revoke(self, *, user_id: str, display: DisplayIdentity) -> None:
-        with audited(
-            self._db,
-            _actor(user_id, display),
+        # ``source`` is in the WHERE, not only in the decision above: the
+        # row is read on a different connection from the one that writes,
+        # so a hand-run grant landing in between must not be overwritten by
+        # a decision taken against the row as it used to be.
+        self._write(
             AUDIT_ACTION_PLATFORM_ROLE_REVOKE,
-            target_type="user",
-            target_id=user_id,
-            target_label=display.email or display.name,
-            org_id=None,
-            detail={"origin": "oidc", "group": self._admin_group},
-        ) as event:
-            # ``source`` is in the WHERE, not only in the decision above: the
-            # row is read on a different connection from the one that writes,
-            # so a hand-run grant landing in between must not be overwritten by
-            # a decision taken against the row as it used to be.
-            event.conn.execute(
-                """
+            user_id=user_id,
+            display=display,
+            sql="""
                 UPDATE collab_platform_roles
                    SET status = %s
                  WHERE user_id = %s AND source = %s AND status = %s
                 """,
-                (
-                    PLATFORM_ROLE_REVOKED,
-                    user_id,
-                    PLATFORM_ROLE_SOURCE_IDP,
-                    PLATFORM_ROLE_ACTIVE,
-                ),
-            )
+            params=(
+                PLATFORM_ROLE_REVOKED,
+                user_id,
+                PLATFORM_ROLE_SOURCE_IDP,
+                PLATFORM_ROLE_ACTIVE,
+            ),
+        )
+
+    def _write(self, action: str, *, user_id: str, display: DisplayIdentity, sql: str, params: tuple) -> None:
+        """Run one guarded role write and record it, or record nothing.
+
+        When the guard suppresses the write -- a hand-run change landed after
+        the row was read -- the audit entry is rolled back with it. A log
+        saying sync granted a role the table does not show would be believed.
+        """
+
+        try:
+            with audited(
+                self._db,
+                _actor(user_id, display),
+                action,
+                target_type="user",
+                target_id=user_id,
+                target_label=display.email or display.name,
+                org_id=None,
+                detail={"origin": "oidc", "group": self._admin_group},
+            ) as event:
+                if event.conn.execute(sql, params).rowcount == 0:
+                    raise _Unchanged
+        except _Unchanged:
+            return
+
+
+class _Unchanged(Exception):
+    """Raised inside ``audited()`` to roll back an audit row for a no-op write."""
 
 
 def _actor(user_id: str, display: DisplayIdentity) -> AuthContext:

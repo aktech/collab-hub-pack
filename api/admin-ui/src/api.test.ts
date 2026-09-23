@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { getJson } from "./api";
+import { getJson, postJson } from "./api";
 
 function answering(status: number, body?: unknown): typeof fetch {
   return (async () =>
@@ -60,5 +60,19 @@ describe("refusals carry the server's own word", () => {
       state: "unavailable",
       reason: "unavailable",
     });
+  });
+});
+
+describe("postJson", () => {
+  it("returns the body of a success, which can itself say something went wrong", async () => {
+    // A 201 for an invitation that was created but whose email failed: the
+    // request succeeded, and the body is the only place that says the rest.
+    const result = await postJson("api/invitations", {}, "csrf", answering(201, { outcome: "send_failed" }));
+
+    expect(result).toEqual({ state: "ok", data: { outcome: "send_failed" } });
+  });
+
+  it("treats a success with no body as ok with nothing to read", async () => {
+    expect(await postJson("x", {}, "csrf", answering(204))).toEqual({ state: "ok", data: null });
   });
 });

@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { ConnectorIcon, ModelIcon } from "./BrandIcon";
 import { postJson } from "./api";
+import { invitationNotice } from "./invitations";
 import type { Resource } from "./api";
 import { useResource } from "./useResource";
 
@@ -257,6 +258,12 @@ interface UserRow {
   role_source: string | null;
 }
 
+// Revokes the server refuses because nobody could administer the hub after.
+const ROLE_REFUSALS: Record<string, string> = {
+  self_revoke: "You cannot remove your own administrator role. Ask another administrator.",
+  last_operator: "This is the last administrator. Grant the role to someone else first.",
+};
+
 export function Users({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
   const resource = useResource<{ users: UserRow[]; manageable: boolean }>("api/users", reload);
@@ -272,7 +279,11 @@ export function Users({ csrfToken }: { csrfToken: string }) {
       csrfToken,
     );
     setBusy(false);
-    if (result.state !== "ok") setProblem("That change did not go through. Nothing was altered.");
+    if (result.state === "refused" && result.reason in ROLE_REFUSALS) {
+      setProblem(ROLE_REFUSALS[result.reason]);
+    } else if (result.state !== "ok") {
+      setProblem("That change did not go through. Nothing was altered.");
+    }
     setReload((n) => n + 1);
   }
 
@@ -516,17 +527,6 @@ interface InvitationRow {
   expires_at: string | null;
 }
 
-const ISSUE_OUTCOMES: Record<string, string> = {
-  sent: "Invitation sent.",
-  send_unknown:
-    "The invitation was created, but the mail provider did not confirm delivery. Check before sending another.",
-  send_failed:
-    "The invitation was created, but the email could not be sent. They will need the link another way.",
-  already_live: "That address already has a live invitation, so a second one was not created.",
-  invalid_email: "That does not look like an email address.",
-  unavailable: "This hub cannot issue invitations right now.",
-};
-
 export function Invitations({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
   const resource = useResource<{ invitations: InvitationRow[] }>("api/invitations", reload);
@@ -544,16 +544,8 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
     const result = await postJson("api/invitations", { email: address }, csrfToken);
     setBusy(false);
 
-    // The server names the outcome; this only maps its word to a sentence, and
-    // falls back for a failure that never reached the endpoint at all.
-    if (result.state === "ok") {
-      setEmail("");
-      setNotice({ text: ISSUE_OUTCOMES.sent, bad: false });
-    } else if ("reason" in result && result.reason in ISSUE_OUTCOMES) {
-      setNotice({ text: ISSUE_OUTCOMES[result.reason], bad: true });
-    } else {
-      setNotice({ text: "That did not go through. Nothing was created.", bad: true });
-    }
+    if (result.state === "ok") setEmail("");
+    setNotice(invitationNotice(result));
     setReload((n) => n + 1);
   }
 
@@ -665,12 +657,32 @@ interface AuditRow {
 }
 
 export function Audit() {
-  const resource = useResource<{ entries: AuditRow[]; next_before_id: number | null }>("api/audit");
+  // The cursors of the pages already walked past, newest first, so "Newer"
+  // can step back without the server having to page in both directions.
+  const [cursors, setCursors] = useState<number[]>([]);
+  const before = cursors.length ? cursors[cursors.length - 1] : null;
+  const resource = useResource<{ entries: AuditRow[]; next_before_id: number | null }>(
+    before === null ? "api/audit" : `api/audit?before_id=${before}`,
+  );
 
   if (resource === null) return <Loading subject="the audit log" />;
   if (resource.state !== "ok") return <Failure resource={resource} subject="the audit log" />;
 
-  const { entries } = resource.data;
+  const { entries, next_before_id } = resource.data;
+  const pager = (
+    <p>
+      {cursors.length > 0 && (
+        <button type="button" className="link" onClick={() => setCursors((c) => c.slice(0, -1))}>
+          Newer
+        </button>
+      )}{" "}
+      {next_before_id !== null && (
+        <button type="button" className="link" onClick={() => setCursors((c) => [...c, next_before_id])}>
+          Older
+        </button>
+      )}
+    </p>
+  );
 
   return (
     <>
@@ -698,6 +710,7 @@ export function Audit() {
           ))}
         </tbody>
       </table>
+      {pager}
     </>
   );
 }

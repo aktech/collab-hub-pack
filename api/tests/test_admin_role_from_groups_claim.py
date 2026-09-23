@@ -124,3 +124,29 @@ async def test_a_hand_granted_operator_survives_a_sign_in_carrying_no_groups(tmp
         principal = _org_store(app).resolve_principal(idp.sub)
 
     assert principal.platform_role == PLATFORM_ROLE_OPERATOR
+
+
+@pytest.mark.asyncio
+async def test_the_sync_runs_off_the_event_loop(tmp_path, idp: _StubIdp):
+    """The Postgres sync makes blocking database calls. Run on the loop, every
+    sign-in would stall every other request this process is serving."""
+
+    import threading
+
+    app = make_web_app(tmp_path, idp, web={"admin_group": ADMIN_GROUP, "public_base_url": PUBLIC_BASE_URL})
+
+    async with app.router.lifespan_context(app):
+        sync = app.state.platform_role_sync
+        reconcile = sync.reconcile
+        threads: list[int] = []
+
+        def recording(**kwargs):
+            threads.append(threading.get_ident())
+            return reconcile(**kwargs)
+
+        sync.reconcile = recording
+        await _sign_in_with_groups(app, idp, [ADMIN_GROUP])
+        principal = _org_store(app).resolve_principal(idp.sub)
+
+    assert threads and threads[0] != threading.get_ident()
+    assert principal.platform_role == PLATFORM_ROLE_OPERATOR

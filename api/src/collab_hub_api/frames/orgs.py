@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 orgs_logger = logging.getLogger("frames_server.orgs")
@@ -283,12 +284,18 @@ class InMemoryOrgStore(OrgStore):
         either backend instead of carrying two copies of the rule.
         """
 
+        return self.get_platform_role_rows([user_id]).get(user_id)
+
+    def get_platform_role_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
+        """The stored rows for *user_ids*, keyed by id; absent ids have none."""
+
         with self._lock:
-            stored = self._platform_roles.get(user_id)
-        if stored is None:
-            return None
-        role, status, source = stored
-        return {"role": role, "status": status, "source": source}
+            stored = {user_id: self._platform_roles.get(user_id) for user_id in user_ids}
+        return {
+            user_id: {"role": row[0], "status": row[1], "source": row[2]}
+            for user_id, row in stored.items()
+            if row is not None
+        }
 
     def resolve_principal(self, user_id: str) -> ResolvedPrincipal:
         # Through get_membership on purpose, so a test subclass that counts or
@@ -478,19 +485,31 @@ class PostgresOrgStore(OrgStore):
         do. Not on the auth path, so it costs nothing there.
         """
 
+        return self.get_platform_role_rows([user_id]).get(user_id)
+
+    def get_platform_role_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
+        """The stored rows for *user_ids* in one round trip, keyed by id.
+
+        For the admin panel's user listing, which would otherwise read one row
+        per person on the page.
+        """
+
         import psycopg
 
+        if not user_ids:
+            return {}
         try:
             with self._db.connection() as conn:
-                row = conn.execute(
-                    "SELECT role, status, source FROM collab_platform_roles WHERE user_id = %s",
-                    (user_id,),
-                ).fetchone()
+                rows = conn.execute(
+                    "SELECT user_id, role, status, source FROM collab_platform_roles WHERE user_id = ANY(%s)",
+                    (list(user_ids),),
+                ).fetchall()
         except psycopg.errors.UndefinedTable as exc:
             raise self._missing_schema() from exc
-        if row is None:
-            return None
-        return {"role": row["role"], "status": row["status"], "source": row["source"]}
+        return {
+            row["user_id"]: {"role": row["role"], "status": row["status"], "source": row["source"]}
+            for row in rows
+        }
 
     def _missing_schema(self) -> OrgSchemaMissingError:
         message = (

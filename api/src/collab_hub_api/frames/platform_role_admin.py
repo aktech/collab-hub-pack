@@ -35,7 +35,19 @@ from .auth import AuthContext
 from .orgs import PLATFORM_ROLE_ACTIVE, PLATFORM_ROLE_OPERATOR, PLATFORM_ROLE_REVOKED
 from .platform_role_sync import PLATFORM_ROLE_SOURCE_MANUAL
 
-__all__ = ["PostgresPlatformRoleAdmin"]
+__all__ = ["PlatformRoleChangeRefused", "PostgresPlatformRoleAdmin"]
+
+
+class PlatformRoleChangeRefused(Exception):
+    """A revoke that would leave the deployment without a working administrator.
+
+    ``reason`` is ``self_revoke`` or ``last_operator``. Both are refused because
+    the only way back from either is a hand-run insert in psql.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class PostgresPlatformRoleAdmin:
@@ -84,6 +96,8 @@ class PostgresPlatformRoleAdmin:
             )
 
     def revoke(self, actor: AuthContext, *, user_id: str, user_label: str | None = None) -> None:
+        if user_id == actor.user:
+            raise PlatformRoleChangeRefused("self_revoke")
         with audited(
             self._db,
             actor,
@@ -94,6 +108,25 @@ class PostgresPlatformRoleAdmin:
             org_id=None,
             detail={"origin": "admin_panel"},
         ) as event:
+            # Every active operator row, locked for the rest of this
+            # transaction. Two operators revoking each other at the same time
+            # would otherwise each see the other still active and both
+            # succeed; with the lock the second waits, re-reads, and finds it
+            # is about to remove the last one. Raising here rolls back before
+            # anything, audit row included, is written.
+            operators = {
+                row["user_id"]
+                for row in event.conn.execute(
+                    """
+                    SELECT user_id FROM collab_platform_roles
+                     WHERE role = %s AND status = %s
+                       FOR UPDATE
+                    """,
+                    (PLATFORM_ROLE_OPERATOR, PLATFORM_ROLE_ACTIVE),
+                ).fetchall()
+            }
+            if operators == {user_id}:
+                raise PlatformRoleChangeRefused("last_operator")
             # No ``source`` in the WHERE, unlike sync's revoke: an administrator
             # may take away authority the provider granted. The row keeps its
             # source, so a synced one comes back at that person's next sign-in

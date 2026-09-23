@@ -25,6 +25,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 
 from ..frames.auth import display_identity_from_claims, user_from_claims
 from ..path_protection import request_path
@@ -513,7 +514,9 @@ def make_router(
         # here, it is never read on this axis at all. Failing to reconcile must
         # not fail the sign-in: the fallback is the role the table already
         # holds, which is the behaviour every deployment had before this.
-        _reconcile_platform_role(request, user=user, claims=claims, display=display)
+        # On a worker thread: the Postgres sync makes blocking database calls,
+        # and on the event loop they would stall every other request.
+        await run_in_threadpool(_reconcile_platform_role, request, user=user, claims=claims, display=display)
         now = surface.now()
         # One source for both the signed `exp` and the cookie's Max-Age, and
         # it clamps the validated field through a module function rather than
