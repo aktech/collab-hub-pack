@@ -10,6 +10,8 @@
 export type Resource<T> =
   | { state: "ok"; data: T }
   | { state: "forbidden" }
+  /** The session ran out while the panel was open; signing in again fixes it. */
+  | { state: "signed-out" }
   /** The request was understood and declined, and the server said why. */
   | { state: "refused"; reason: string }
   | { state: "unavailable"; reason: string }
@@ -24,6 +26,15 @@ export type Resource<T> =
  * failure would lose the difference between "that address already has a live
  * invitation" and "the hub is broken".
  */
+/** Raised on `window` when any call finds the session gone, so the panel as a
+ * whole says so once, and no screen reports it as a failure. */
+export const SIGNED_OUT_EVENT = "collab-admin:signed-out";
+
+function signedOut(): { state: "signed-out" } {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(SIGNED_OUT_EVENT));
+  return { state: "signed-out" };
+}
+
 async function reason(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { outcome?: unknown; error?: unknown };
@@ -45,6 +56,7 @@ export async function getJson<T>(path: string, fetchImpl: typeof fetch = fetch):
     return { state: "error" };
   }
 
+  if (response.status === 401) return signedOut();
   if (response.status === 403) return { state: "forbidden" };
   // 503 is "this deployment cannot answer" (no database, no credential); 502 is
   // "the thing behind us did not". An operator needs to tell those apart: one
@@ -89,6 +101,7 @@ export async function postJson(
     return { state: "error" };
   }
 
+  if (response.status === 401) return signedOut();
   if (response.status === 403) return { state: "forbidden" };
   if (response.status === 503) return { state: "unavailable", reason: await reason(response) };
   if (response.status === 502) return { state: "upstream-error", reason: await reason(response) };

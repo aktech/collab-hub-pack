@@ -1,4 +1,5 @@
 import { LogOut, Moon, Sun } from "lucide-react";
+import { useState } from "react";
 
 import logo from "./assets/collab-logo.png";
 import { initials } from "./avatar";
@@ -24,8 +25,12 @@ export function Header({
   theme: Theme;
   onToggleTheme: () => void;
 }) {
+  const [signOutFailed, setSignOutFailed] = useState(false);
+
   async function leave() {
-    window.location.href = await signOut(session.csrf_token);
+    const next = await signOut(session.csrf_token);
+    if (next) window.location.href = next;
+    else setSignOutFailed(true);
   }
 
   const nextLabel = theme === "dark" ? "Switch to light theme" : "Switch to dark theme";
@@ -40,6 +45,7 @@ export function Header({
         <span className="avatar" aria-hidden="true">
           {initials(session)}
         </span>
+        {signOutFailed && <span className="bad">Sign-out did not go through. Try again.</span>}
         <span className="who">{session.email || session.user}</span>
         <button
           type="button"

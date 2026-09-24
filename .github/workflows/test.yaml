@@ -16,6 +16,25 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A real database, so the live-Postgres tests run here and do not skip:
+    # migrations, row locks and transaction rollbacks are what a fake cannot
+    # show. Trust auth because the container lives for this job only and is
+    # reachable only from the runner; there is no password to hard-code.
+    services:
+      postgres:
+        image: postgres:16.15@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: collab_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      COLLAB_HUB_TEST_POSTGRES_URL: postgresql://postgres@localhost:5432/collab_test
     steps:
       - uses: actions/checkout@v5
         with:

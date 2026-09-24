@@ -19,11 +19,15 @@ describe("signOut", () => {
     expect(next).toBe(SIGNED_OUT_URL);
   });
 
-  it("still sends the person to the signed-out page when the call fails", async () => {
+  // The signed-out page is static: it cannot tell anyone their session
+  // survived. So a sign-out the server did not accept must not end there.
+  it("reports a failure when the server did not confirm the sign-out", async () => {
     const failing = (async () => {
       throw new TypeError("network");
     }) as unknown as typeof fetch;
+    const refused = (async () => new Response(null, { status: 403 })) as unknown as typeof fetch;
 
-    expect(await signOut("csrf-value", failing)).toBe(SIGNED_OUT_URL);
+    expect(await signOut("csrf-value", failing)).toBeNull();
+    expect(await signOut("csrf-value", refused)).toBeNull();
   });
 });

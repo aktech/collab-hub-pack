@@ -858,3 +858,37 @@ def test_live_legacy_registry_gains_the_column_and_a_backfill(clean_database):
         # Backfill only — nothing was re-applied, existing data survives.
         assert conn.execute("SELECT count(*) AS n FROM collab_orgs").fetchone()["n"] == 1
     assert recorded == EXPECTED_CHECKSUMS
+
+
+@live_postgres
+def test_live_upgrade_from_version_six_keeps_existing_rows_and_widens_the_vocabulary(clean_database, monkeypatch):
+    """The path every running deployment takes: a database already at v6, with
+    rows in it, migrated to the latest version. A fresh create never exercises
+    the backfill or the constraint swaps."""
+
+    released = tuple((version, statements) for version, statements in COLLAB_SCHEMA_MIGRATIONS if version <= 6)
+    monkeypatch.setattr(collab_schema, "COLLAB_SCHEMA_MIGRATIONS", released)
+    run_collab_schema_migrations(clean_database)
+    with clean_database.connection() as conn:
+        conn.execute(
+            "INSERT INTO collab_platform_roles (user_id, role, status) VALUES ('sub-bootstrap', 'operator', 'active')"
+        )
+        conn.execute("INSERT INTO collab_audit_events (actor, action) VALUES ('sub-bootstrap', 'operator.manual')")
+    assert applied_collab_schema_version(clean_database) == 6
+
+    monkeypatch.undo()
+    run_collab_schema_migrations(clean_database)
+
+    assert applied_collab_schema_version(clean_database) == LATEST_COLLAB_SCHEMA_VERSION
+    with clean_database.connection() as conn:
+        # The hand-inserted bootstrap operator is backfilled as manual, which is
+        # what keeps sign-in sync from ever revoking it.
+        row = conn.execute(
+            "SELECT status, source FROM collab_platform_roles WHERE user_id = 'sub-bootstrap'"
+        ).fetchone()
+        assert (row["status"], row["source"]) == ("active", "manual")
+        # The old audit row survives the constraint swaps, and the new actions
+        # are accepted.
+        assert conn.execute("SELECT count(*) AS n FROM collab_audit_events").fetchone()["n"] == 1
+        for action in ("platform_role.grant", "platform_role.revoke", "service_access.revoke", "connector.disable"):
+            conn.execute("INSERT INTO collab_audit_events (actor, action) VALUES ('sub-op', %s)", (action,))

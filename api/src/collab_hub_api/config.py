@@ -283,9 +283,10 @@ class WebConfig(BaseModel):
 
     Carrying the group into the token is realm configuration, not a setting
     here: the client needs a groups mapper (or the ``groups`` client scope) so
-    that the ID token actually holds the claim. Without it this reads an absent
-    claim, which is indistinguishable from "in no groups" and therefore grants
-    nobody.
+    that the ID token actually holds the claim. Without it the claim is absent,
+    and sign-in skips the sync entirely (logging
+    ``platform_role_sync_no_groups_claim``): nobody is granted and nobody is
+    revoked.
     """
 
     @field_validator(

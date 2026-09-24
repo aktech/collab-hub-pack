@@ -14,17 +14,22 @@
 export const SIGNOUT_URL = "../web/signout";
 export const SIGNED_OUT_URL = "../web/signed-out";
 
-export async function signOut(csrfToken: string, fetchImpl: typeof fetch = fetch): Promise<string> {
+/**
+ * Where to go once signed out, or `null` if the server did not confirm it.
+ *
+ * The signed-out page is static and cannot tell anyone their session
+ * survived, so a sign-out that failed must not end there: the session cookie
+ * may still be live, and the person would leave believing otherwise.
+ */
+export async function signOut(csrfToken: string, fetchImpl: typeof fetch = fetch): Promise<string | null> {
   try {
-    await fetchImpl(SIGNOUT_URL, {
+    const response = await fetchImpl(SIGNOUT_URL, {
       method: "POST",
       credentials: "same-origin",
       headers: { "X-CSRF-Token": csrfToken },
     });
+    return response.ok || (response.status >= 300 && response.status < 400) ? SIGNED_OUT_URL : null;
   } catch {
-    // Deliberately swallowed. Whatever happened to the request, the person
-    // asked to leave: sending them to the signed-out page is right either way,
-    // and that page is where they find out if a session somehow survived.
+    return null;
   }
-  return SIGNED_OUT_URL;
 }

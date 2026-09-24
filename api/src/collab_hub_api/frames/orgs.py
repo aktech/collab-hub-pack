@@ -286,6 +286,16 @@ class InMemoryOrgStore(OrgStore):
 
         return self.get_platform_role_rows([user_id]).get(user_id)
 
+    def active_operator_ids(self) -> set[str]:
+        """Everyone holding an active operator role."""
+
+        with self._lock:
+            return {
+                user_id
+                for user_id, (role, status, _source) in self._platform_roles.items()
+                if role == PLATFORM_ROLE_OPERATOR and status == PLATFORM_ROLE_ACTIVE
+            }
+
     def get_platform_role_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
         """The stored rows for *user_ids*, keyed by id; absent ids have none."""
 

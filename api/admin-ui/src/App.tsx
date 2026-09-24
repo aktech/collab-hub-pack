@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { SIGNED_OUT_EVENT } from "./api";
 import { Header } from "./Header";
 import { Audit, Connectors, Invitations, Models, Usage, Users } from "./Sections";
 import { type SessionResult, loadSession } from "./session";
@@ -59,6 +60,14 @@ export function App() {
   useEffect(() => {
     applyTheme(document.documentElement, theme);
   }, [theme]);
+
+  // A call that finds the session gone switches the whole panel to the
+  // signed-out notice, whichever screen it came from.
+  useEffect(() => {
+    const ended = () => setResult({ state: "signed-out" });
+    window.addEventListener(SIGNED_OUT_EVENT, ended);
+    return () => window.removeEventListener(SIGNED_OUT_EVENT, ended);
+  }, []);
 
   // The back and forward buttons change only the fragment; follow them.
   useEffect(() => {

@@ -287,3 +287,54 @@ def test_live_sync_records_no_revoke_when_a_hand_grant_won_the_race(live_databas
 
     assert _active_operators(live_database) == {"u-2"}
     assert _oidc_audit_rows(live_database) == []
+
+
+def test_revoking_someone_who_holds_no_active_role_is_refused_and_unrecorded():
+    """Nothing would change, so nothing may be recorded: an audit row saying a
+    role was revoked when none was held would be believed."""
+
+    db = FakeAuditDatabase(rows=[[{"user_id": "u-1"}, {"user_id": "u-3"}]])
+    admin = PostgresPlatformRoleAdmin(db)
+
+    with pytest.raises(PlatformRoleChangeRefused) as refused:
+        admin.revoke(OPERATOR, user_id="u-2")
+
+    assert refused.value.reason == "not_operator"
+    assert audit_row(db) is None
+    assert not any(sql.startswith("UPDATE") for sql, _ in statements(db))
+
+
+@live_postgres
+def test_live_a_second_revoke_of_the_same_person_records_nothing(live_database):
+    admin = PostgresPlatformRoleAdmin(live_database)
+    admin.grant(OPERATOR, user_id="u-1")
+    admin.grant(OPERATOR, user_id="u-2")
+    admin.revoke(OPERATOR, user_id="u-2")
+
+    with pytest.raises(PlatformRoleChangeRefused):
+        admin.revoke(OPERATOR, user_id="u-2")
+
+    with live_database.connection() as conn:
+        revokes = conn.execute(
+            "SELECT count(*) AS n FROM collab_audit_events WHERE action = 'platform_role.revoke'"
+        ).fetchone()["n"]
+    assert revokes == 1
+
+
+@live_postgres
+def test_live_sync_keeps_the_last_operator_after_a_panel_revoke(live_database):
+    """The race from the review, serialized: the panel revokes B while A's
+    sign-in carries no admin group. Whichever commits second must find it
+    would remove the last operator."""
+
+    from collab_hub_api.frames.platform_role_sync import PostgresPlatformRoleSync
+
+    sync = PostgresPlatformRoleSync(live_database, admin_group="/hub-admins")
+    sync.reconcile(user_id="u-1", claim_groups=["/hub-admins"], display=OPERATOR.display)
+    sync.reconcile(user_id="u-2", claim_groups=["/hub-admins"], display=OPERATOR.display)
+
+    PostgresPlatformRoleAdmin(live_database).revoke(OPERATOR, user_id="u-2")
+    role = sync.reconcile(user_id="u-1", claim_groups=[], display=OPERATOR.display)
+
+    assert role == "operator"
+    assert _active_operators(live_database) == {"u-1"}

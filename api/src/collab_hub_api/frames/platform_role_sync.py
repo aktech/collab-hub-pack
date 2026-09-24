@@ -40,10 +40,18 @@ deployment they just bootstrapped.
 Hence ``source``: ``manual`` rows are administered here and never touched by
 sync; ``idp`` rows are sync's own and it may grant or revoke them freely. It is
 the split any OIDC group sync ends up needing, and for this reason.
+
+Sync never revokes the **last** active operator, whatever the claim says. A
+renamed admin group, or a groups mapper switched between ``/group`` and
+``group``, would otherwise revoke every synced operator at their next sign-in,
+and the last one out leaves psql as the only way back. The refusal is logged
+(``platform_role_sync_kept_last_operator``) so the cause gets noticed. The
+group name is matched with or without its leading slash for the same reason.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 from .audit import (
@@ -61,6 +69,8 @@ __all__ = [
     "InMemoryPlatformRoleSync",
     "PostgresPlatformRoleSync",
 ]
+
+logger = logging.getLogger(__name__)
 
 PLATFORM_ROLE_SOURCE_MANUAL = "manual"
 """Administered by hand (the documented bootstrap insert). Sync never touches these."""
@@ -120,7 +130,8 @@ class _PlatformRoleSync:
         revoked row means.
         """
 
-        in_admin_group = self._admin_group in claim_groups
+        wanted = _group_name(self._admin_group)
+        in_admin_group = any(_group_name(group) == wanted for group in claim_groups)
         current = self._current_row(user_id)
 
         if in_admin_group and _is_sync_owned(current) and not _is_active(current):
@@ -128,8 +139,10 @@ class _PlatformRoleSync:
             return PLATFORM_ROLE_OPERATOR
 
         if not in_admin_group and current is not None and _is_sync_owned(current) and _is_active(current):
-            self._revoke(user_id=user_id, display=display)
-            return None
+            if self._revoke(user_id=user_id, display=display):
+                return None
+            logger.warning("platform_role_sync_kept_last_operator", extra={"user": user_id})
+            return PLATFORM_ROLE_OPERATOR
 
         return current["role"] if _is_active(current) else None
 
@@ -139,7 +152,9 @@ class _PlatformRoleSync:
     def _grant(self, *, user_id: str, display: DisplayIdentity) -> None:
         raise NotImplementedError
 
-    def _revoke(self, *, user_id: str, display: DisplayIdentity) -> None:
+    def _revoke(self, *, user_id: str, display: DisplayIdentity) -> bool:
+        """Revoke unless this is the last active operator; say whether it did."""
+
         raise NotImplementedError
 
 
@@ -167,13 +182,16 @@ class InMemoryPlatformRoleSync(_PlatformRoleSync):
             PLATFORM_ROLE_SOURCE_IDP,
         )
 
-    def _revoke(self, *, user_id: str, display: DisplayIdentity) -> None:
+    def _revoke(self, *, user_id: str, display: DisplayIdentity) -> bool:
+        if self._store.active_operator_ids() == {user_id}:
+            return False
         self._store.set_platform_role(
             user_id,
             PLATFORM_ROLE_OPERATOR,
             PLATFORM_ROLE_REVOKED,
             PLATFORM_ROLE_SOURCE_IDP,
         )
+        return True
 
 
 class PostgresPlatformRoleSync(_PlatformRoleSync):
@@ -231,12 +249,12 @@ class PostgresPlatformRoleSync(_PlatformRoleSync):
             ),
         )
 
-    def _revoke(self, *, user_id: str, display: DisplayIdentity) -> None:
+    def _revoke(self, *, user_id: str, display: DisplayIdentity) -> bool:
         # ``source`` is in the WHERE, not only in the decision above: the
         # row is read on a different connection from the one that writes,
         # so a hand-run grant landing in between must not be overwritten by
         # a decision taken against the row as it used to be.
-        self._write(
+        return self._write(
             AUDIT_ACTION_PLATFORM_ROLE_REVOKE,
             user_id=user_id,
             display=display,
@@ -251,14 +269,28 @@ class PostgresPlatformRoleSync(_PlatformRoleSync):
                 PLATFORM_ROLE_SOURCE_IDP,
                 PLATFORM_ROLE_ACTIVE,
             ),
-        )
+            keep_last_operator=True,
+        ) != _KEPT_LAST_OPERATOR
 
-    def _write(self, action: str, *, user_id: str, display: DisplayIdentity, sql: str, params: tuple) -> None:
+    def _write(
+        self,
+        action: str,
+        *,
+        user_id: str,
+        display: DisplayIdentity,
+        sql: str,
+        params: tuple,
+        keep_last_operator: bool = False,
+    ) -> str | None:
         """Run one guarded role write and record it, or record nothing.
 
         When the guard suppresses the write -- a hand-run change landed after
         the row was read -- the audit entry is rolled back with it. A log
         saying sync granted a role the table does not show would be believed.
+
+        With *keep_last_operator*, the active operators are read under a lock
+        first (:func:`lock_active_operators`) and the write is abandoned if
+        *user_id* is the only one; that returns :data:`_KEPT_LAST_OPERATOR`.
         """
 
         try:
@@ -272,14 +304,48 @@ class PostgresPlatformRoleSync(_PlatformRoleSync):
                 org_id=None,
                 detail={"origin": "oidc", "group": self._admin_group},
             ) as event:
+                if keep_last_operator and lock_active_operators(event.conn) == {user_id}:
+                    raise _Unchanged(_KEPT_LAST_OPERATOR)
                 if event.conn.execute(sql, params).rowcount == 0:
-                    raise _Unchanged
-        except _Unchanged:
-            return
+                    raise _Unchanged(None)
+        except _Unchanged as unchanged:
+            return unchanged.args[0]
+        return None
 
 
 class _Unchanged(Exception):
     """Raised inside ``audited()`` to roll back an audit row for a no-op write."""
+
+
+_KEPT_LAST_OPERATOR = "kept_last_operator"
+
+
+def _group_name(group: str) -> str:
+    """A group path without its leading slash, so ``/admins`` matches ``admins``."""
+
+    return group.lstrip("/")
+
+
+def lock_active_operators(conn) -> set[str]:
+    """Every active operator, with their rows locked until the transaction ends.
+
+    Both revoke paths -- the panel's and sign-in sync's -- read this before
+    writing, so two revokes running at once cannot each see the other still
+    active and together remove the last administrator: the second waits for
+    the first to commit, then reads the result. ``ORDER BY`` makes every caller
+    take the locks in the same order, so two of them cannot deadlock.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT user_id FROM collab_platform_roles
+         WHERE role = %s AND status = %s
+         ORDER BY user_id
+           FOR UPDATE
+        """,
+        (PLATFORM_ROLE_OPERATOR, PLATFORM_ROLE_ACTIVE),
+    ).fetchall()
+    return {row["user_id"] for row in rows}
 
 
 def _actor(user_id: str, display: DisplayIdentity) -> AuthContext:

@@ -27,12 +27,11 @@ is a separate question that must be asked on every route of this surface.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from ..dependencies import (
     get_audit_log,
@@ -175,14 +174,17 @@ def make_router() -> APIRouter:
     @router.get("/invitations")
     def admin_invitations(
         service: Annotated[InvitationService, Depends(get_invitation_service)],
+        offset: Annotated[int, Query(ge=0)] = 0,
     ):
-        """Every invitation on this deployment, newest first.
+        """One page of every invitation on this deployment, newest first.
 
         The same listing the server-rendered page shows, read through the same
         service call, so the panel and that page cannot disagree about what
-        exists. Issuing and revoking still live on the page: those carry a
-        one-time secret and an email send, and moving them is a change worth
-        making on its own rather than as part of a nav tidy-up.
+        exists. Issuing and revoking are the two endpoints below.
+
+        ``next_offset`` is where the following page starts, or ``None`` on the
+        last page. It is an offset because that is what the service pages by:
+        an invitation issued while someone is paging shifts later pages by one.
 
         No secret appears here, and none can: the service returns invitation
         rows, and the raw token exists only as the return value of creating
@@ -190,7 +192,7 @@ def make_router() -> APIRouter:
         """
 
         try:
-            page = service.list_all(limit=INVITATION_LISTING_LIMIT, offset=0)
+            page = service.list_all(limit=INVITATION_LISTING_LIMIT, offset=offset)
             now = service.server_now()
         except InvitationsUnavailableError:
             return JSONResponse({"error": "invitations_unavailable"}, status_code=503)
@@ -207,6 +209,7 @@ def make_router() -> APIRouter:
                 for row in page.invitations
             ],
             "has_more": page.has_more,
+            "next_offset": offset + len(page.invitations) if page.has_more else None,
         }
 
     @router.post("/invitations", status_code=201)
@@ -373,8 +376,14 @@ def make_router() -> APIRouter:
         directory: Annotated[UserDirectoryClient, Depends(get_user_directory_client)],
         query: Annotated[str | None, Query(max_length=256)] = None,
         limit: Annotated[int, Query(ge=1, le=200)] = DEFAULT_PAGE_SIZE,
+        first: Annotated[int, Query(ge=0)] = 0,
     ):
         """People this hub knows, with the authority this hub holds for them.
+
+        One page at a time: ``next_first`` is where the following page starts,
+        or ``None`` on the last. One extra person is asked for to tell the two
+        apart, so a page that happens to end exactly at the last person does
+        not offer an empty "next".
 
         Two sources, joined here and nowhere else: the directory knows who
         exists, and only this deployment knows who is an operator. Neither can
@@ -388,10 +397,12 @@ def make_router() -> APIRouter:
         """
 
         try:
-            people = directory.search_users(query, limit=limit)
+            people = directory.search_users(query, limit=limit + 1, first=first)
         except UserDirectoryUnavailableError:
             return JSONResponse({"error": "user_directory_unavailable"}, status_code=503)
 
+        more = len(people) > limit
+        people = people[:limit]
         roles = _active_role_rows(request, [person.id for person in people])
         return {
             "users": [
@@ -404,6 +415,7 @@ def make_router() -> APIRouter:
                 }
                 for person in people
             ],
+            "next_first": first + limit if more else None,
             "manageable": getattr(request.app.state, "platform_role_admin", None) is not None,
         }
 
@@ -503,8 +515,8 @@ def make_router() -> APIRouter:
     @router.get("/usage")
     def admin_usage(
         usage_store: Annotated[UsageStore, Depends(get_usage_store)],
-        since: Annotated[datetime | None, Query()] = None,
-        until: Annotated[datetime | None, Query()] = None,
+        since: Annotated[AwareDatetime | None, Query()] = None,
+        until: Annotated[AwareDatetime | None, Query()] = None,
     ):
         """Activity across every organization on this deployment.
 

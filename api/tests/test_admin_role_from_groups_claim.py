@@ -90,6 +90,8 @@ async def test_signing_in_without_the_group_revokes_a_previously_synced_role(tmp
     app = make_web_app(tmp_path, idp, web={"admin_group": ADMIN_GROUP, "public_base_url": PUBLIC_BASE_URL})
 
     async with app.router.lifespan_context(app):
+        # Another operator, so this is not the last one: sync keeps the last.
+        _org_store(app).set_platform_role("u-bootstrap")
         await _sign_in_with_groups(app, idp, [ADMIN_GROUP])
         assert _org_store(app).resolve_principal(idp.sub).platform_role == PLATFORM_ROLE_OPERATOR
 

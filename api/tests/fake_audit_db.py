@@ -62,7 +62,10 @@ class FakeAuditConnection:
         self.outcome: str | None = None
         self.info = FakeConnectionInfo()
         self._pending: dict | None = None
-        self._rows = list(rows)
+        # Shared with the database when it hands its own list over, so a script
+        # is answered in order across connections, as code that reads on one
+        # connection and writes on another sees it.
+        self._rows = rows if isinstance(rows, list) else list(rows)
 
     def __enter__(self):
         return self

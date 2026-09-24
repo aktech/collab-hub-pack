@@ -33,7 +33,7 @@ from .audit import (
 )
 from .auth import AuthContext
 from .orgs import PLATFORM_ROLE_ACTIVE, PLATFORM_ROLE_OPERATOR, PLATFORM_ROLE_REVOKED
-from .platform_role_sync import PLATFORM_ROLE_SOURCE_MANUAL
+from .platform_role_sync import PLATFORM_ROLE_SOURCE_MANUAL, lock_active_operators
 
 __all__ = ["PlatformRoleChangeRefused", "PostgresPlatformRoleAdmin"]
 
@@ -41,8 +41,9 @@ __all__ = ["PlatformRoleChangeRefused", "PostgresPlatformRoleAdmin"]
 class PlatformRoleChangeRefused(Exception):
     """A revoke that would leave the deployment without a working administrator.
 
-    ``reason`` is ``self_revoke`` or ``last_operator``. Both are refused because
-    the only way back from either is a hand-run insert in psql.
+    ``reason`` is ``self_revoke`` or ``last_operator``, both refused because the
+    only way back from either is a hand-run insert in psql, or ``not_operator``
+    when the person holds no active role and there is nothing to revoke.
     """
 
     def __init__(self, reason: str) -> None:
@@ -108,23 +109,11 @@ class PostgresPlatformRoleAdmin:
             org_id=None,
             detail={"origin": "admin_panel"},
         ) as event:
-            # Every active operator row, locked for the rest of this
-            # transaction. Two operators revoking each other at the same time
-            # would otherwise each see the other still active and both
-            # succeed; with the lock the second waits, re-reads, and finds it
-            # is about to remove the last one. Raising here rolls back before
-            # anything, audit row included, is written.
-            operators = {
-                row["user_id"]
-                for row in event.conn.execute(
-                    """
-                    SELECT user_id FROM collab_platform_roles
-                     WHERE role = %s AND status = %s
-                       FOR UPDATE
-                    """,
-                    (PLATFORM_ROLE_OPERATOR, PLATFORM_ROLE_ACTIVE),
-                ).fetchall()
-            }
+            operators = lock_active_operators(event.conn)
+            if user_id not in operators:
+                # Nothing to revoke, so nothing may be recorded: raising rolls
+                # the audit row back with the transaction.
+                raise PlatformRoleChangeRefused("not_operator")
             if operators == {user_id}:
                 raise PlatformRoleChangeRefused("last_operator")
             # No ``source`` in the WHERE, unlike sync's revoke: an administrator

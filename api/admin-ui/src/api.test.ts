@@ -76,3 +76,17 @@ describe("postJson", () => {
     expect(await postJson("x", {}, "csrf", answering(204))).toEqual({ state: "ok", data: null });
   });
 });
+
+describe("an expired session", () => {
+  // The panel stays open after the session cookie runs out. Every later call
+  // answers 401, and that has to read as "sign in again", not as a failure.
+  it("reads as signed out on a GET", async () => {
+    expect(await getJson("api/users", answering(401, { error: "unauthenticated" }))).toEqual({
+      state: "signed-out",
+    });
+  });
+
+  it("reads as signed out on a POST", async () => {
+    expect(await postJson("api/users/u-2/role", {}, "csrf", answering(401))).toEqual({ state: "signed-out" });
+  });
+});

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ConnectorIcon, ModelIcon } from "./BrandIcon";
 import { postJson } from "./api";
 import { invitationNotice } from "./invitations";
+import { Pager, useDebounced, usePages } from "./paging";
 import type { Resource } from "./api";
 import { useResource } from "./useResource";
 
@@ -142,8 +143,9 @@ function GroupMembers({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const searched = useDebounced(query.trim(), 300);
   const candidates = useResource<{ users: UserRow[] }>(
-    query.trim().length >= 2 ? `api/users?query=${encodeURIComponent(query.trim())}` : "",
+    searched.length >= 2 ? `api/users?query=${encodeURIComponent(searched)}` : "",
   );
 
   async function change(action: "grant" | "revoke", person: { id: string; email: string | null }) {
@@ -262,11 +264,16 @@ interface UserRow {
 const ROLE_REFUSALS: Record<string, string> = {
   self_revoke: "You cannot remove your own administrator role. Ask another administrator.",
   last_operator: "This is the last administrator. Grant the role to someone else first.",
+  not_operator: "That person no longer holds the administrator role, so there was nothing to remove.",
 };
 
 export function Users({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
-  const resource = useResource<{ users: UserRow[]; manageable: boolean }>("api/users", reload);
+  const pages = usePages();
+  const resource = useResource<{ users: UserRow[]; manageable: boolean; next_first: number | null }>(
+    pages.cursor === null ? "api/users" : `api/users?first=${pages.cursor}`,
+    reload,
+  );
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -345,6 +352,7 @@ export function Users({ csrfToken }: { csrfToken: string }) {
         Removing a role that came from your identity provider takes effect immediately. That person
         holds it again at their next sign-in while the group still lists them.
       </p>
+      <Pager pages={pages} next={resource.data.next_first} />
     </>
   );
 }
@@ -529,7 +537,11 @@ interface InvitationRow {
 
 export function Invitations({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
-  const resource = useResource<{ invitations: InvitationRow[] }>("api/invitations", reload);
+  const pages = usePages();
+  const resource = useResource<{ invitations: InvitationRow[]; next_offset: number | null }>(
+    pages.cursor === null ? "api/invitations" : `api/invitations?offset=${pages.cursor}`,
+    reload,
+  );
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ text: string; bad: boolean } | null>(null);
@@ -552,7 +564,7 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
   async function revoke(invitation: InvitationRow) {
     setBusy(true);
     setNotice(null);
-    const result = await postJson(`api/invitations/${invitation.id}/revoke`, {}, csrfToken);
+    const result = await postJson(`api/invitations/${encodeURIComponent(invitation.id)}/revoke`, {}, csrfToken);
     setBusy(false);
     if (result.state !== "ok") {
       setNotice({ text: "That invitation was not revoked.", bad: true });
@@ -589,6 +601,7 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
 
       <h3>Issued invitations</h3>
       <InvitationList resource={resource} busy={busy} onRevoke={revoke} />
+      {resource?.state === "ok" && <Pager pages={pages} next={resource.data.next_offset} />}
     </>
   );
 }
@@ -598,7 +611,7 @@ function InvitationList({
   busy,
   onRevoke,
 }: {
-  resource: Resource<{ invitations: InvitationRow[] }> | null;
+  resource: Resource<{ invitations: InvitationRow[]; next_offset: number | null }> | null;
   busy: boolean;
   onRevoke: (invitation: InvitationRow) => void;
 }) {
@@ -657,32 +670,15 @@ interface AuditRow {
 }
 
 export function Audit() {
-  // The cursors of the pages already walked past, newest first, so "Newer"
-  // can step back without the server having to page in both directions.
-  const [cursors, setCursors] = useState<number[]>([]);
-  const before = cursors.length ? cursors[cursors.length - 1] : null;
+  const pages = usePages();
   const resource = useResource<{ entries: AuditRow[]; next_before_id: number | null }>(
-    before === null ? "api/audit" : `api/audit?before_id=${before}`,
+    pages.cursor === null ? "api/audit" : `api/audit?before_id=${pages.cursor}`,
   );
 
   if (resource === null) return <Loading subject="the audit log" />;
   if (resource.state !== "ok") return <Failure resource={resource} subject="the audit log" />;
 
   const { entries, next_before_id } = resource.data;
-  const pager = (
-    <p>
-      {cursors.length > 0 && (
-        <button type="button" className="link" onClick={() => setCursors((c) => c.slice(0, -1))}>
-          Newer
-        </button>
-      )}{" "}
-      {next_before_id !== null && (
-        <button type="button" className="link" onClick={() => setCursors((c) => [...c, next_before_id])}>
-          Older
-        </button>
-      )}
-    </p>
-  );
 
   return (
     <>
@@ -710,7 +706,7 @@ export function Audit() {
           ))}
         </tbody>
       </table>
-      {pager}
+      <Pager pages={pages} next={next_before_id} />
     </>
   );
 }

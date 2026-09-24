@@ -109,6 +109,20 @@ def _within(at: datetime, since: datetime | None, until: datetime | None) -> boo
     return True
 
 
+def _organizations(users: dict[str, int], events: dict[str, int]) -> list[HubOrganizationUsage]:
+    """One row per organization that has people *or* events in the window.
+
+    From both sides, because an organization whose events are counted in the
+    hub total but which has no roster row would otherwise be missing from the
+    breakdown the total is supposed to add up from.
+    """
+
+    return [
+        HubOrganizationUsage(org_id=org_id, users=users.get(org_id, 0), events=events.get(org_id, 0))
+        for org_id in sorted(users.keys() | events.keys())
+    ]
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -373,19 +387,13 @@ class InMemoryUsageStore(UsageStore):
             org_events[entry.org_id] = org_events.get(entry.org_id, 0) + 1
             by_kind[entry.event] = by_kind.get(entry.event, 0) + 1
 
-        organizations = [
-            HubOrganizationUsage(
-                org_id=org_id,
-                users=len(members),
-                events=org_events.get(org_id, 0),
-            )
-            for org_id, members in sorted(org_users.items())
-        ]
         return HubUsage(
             users_total=len(people),
             events_total=len(events),
             events=sorted(by_kind.items()),
-            organizations=organizations,
+            organizations=_organizations(
+                {org_id: len(members) for org_id, members in org_users.items()}, org_events
+            ),
         )
 
     def count_events(
@@ -635,14 +643,7 @@ class PostgresUsageStore(UsageStore):
             users_total=(people or {}).get("users", 0),
             events_total=sum(by_kind.values()),
             events=sorted(by_kind.items()),
-            organizations=[
-                HubOrganizationUsage(
-                    org_id=row["org_id"],
-                    users=row["users"],
-                    events=org_events.get(row["org_id"], 0),
-                )
-                for row in org_rows
-            ],
+            organizations=_organizations({row["org_id"]: row["users"] for row in org_rows}, org_events),
         )
 
     def count_events(

@@ -63,7 +63,12 @@ def test_a_member_of_the_admin_group_is_granted_the_operator_role():
 def test_a_synced_row_is_revoked_when_the_claim_no_longer_carries_the_group():
     """Sync removes as well as adds, or a dropped admin keeps their authority."""
 
-    db = FakeAuditDatabase(rows=[{"role": PLATFORM_ROLE_OPERATOR, "status": "active", "source": "idp"}])
+    db = FakeAuditDatabase(
+        rows=[
+            {"role": PLATFORM_ROLE_OPERATOR, "status": "active", "source": "idp"},
+            [{"user_id": USER}, {"user_id": "u-2"}],
+        ]
+    )
     sync = PostgresPlatformRoleSync(db, admin_group=ADMIN_GROUP)
 
     role = sync.reconcile(user_id=USER, claim_groups=["/everyone"], display=DISPLAY)
@@ -154,6 +159,7 @@ def test_the_in_memory_sync_grants_and_revokes_against_the_org_store():
     """
 
     store = InMemoryOrgStore()
+    store.set_platform_role("u-bootstrap")
     sync = InMemoryPlatformRoleSync(store, admin_group=ADMIN_GROUP)
 
     assert sync.reconcile(user_id=USER, claim_groups=[ADMIN_GROUP], display=DISPLAY) == PLATFORM_ROLE_OPERATOR
@@ -169,6 +175,49 @@ def test_the_in_memory_sync_leaves_a_hand_seeded_row_alone():
     store = InMemoryOrgStore()
     store.set_platform_role(USER)
     sync = InMemoryPlatformRoleSync(store, admin_group=ADMIN_GROUP)
+
+    assert sync.reconcile(user_id=USER, claim_groups=[], display=DISPLAY) == PLATFORM_ROLE_OPERATOR
+    assert store.resolve_principal(USER).platform_role == PLATFORM_ROLE_OPERATOR
+
+
+def test_sync_never_revokes_the_last_active_operator(caplog):
+    """A renamed admin group would otherwise revoke every synced operator at
+    their next sign-in, and the last one out leaves psql as the only way back.
+    The refusal is logged so the rename is noticed."""
+
+    db = FakeAuditDatabase(
+        rows=[
+            {"role": PLATFORM_ROLE_OPERATOR, "status": "active", "source": "idp"},
+            [{"user_id": USER}],
+        ]
+    )
+    sync = PostgresPlatformRoleSync(db, admin_group=ADMIN_GROUP)
+
+    with caplog.at_level("WARNING"):
+        role = sync.reconcile(user_id=USER, claim_groups=["/everyone"], display=DISPLAY)
+
+    assert role == PLATFORM_ROLE_OPERATOR
+    assert _audit_insert(db) is None
+    assert not any(sql.startswith("UPDATE") for sql, _ in _statements(db))
+    assert "platform_role_sync_kept_last_operator" in caplog.text
+
+
+@pytest.mark.parametrize(("configured", "claimed"), [("/hub-admins", "hub-admins"), ("hub-admins", "/hub-admins")])
+def test_the_admin_group_matches_with_or_without_its_leading_slash(configured, claimed):
+    """Keycloak's groups mapper emits ``/group`` or ``group`` depending on its
+    full-path setting. A mismatch must not read as "not an admin", which would
+    quietly revoke every synced operator."""
+
+    db = FakeAuditDatabase(rows=[None])
+    sync = PostgresPlatformRoleSync(db, admin_group=configured)
+
+    assert sync.reconcile(user_id=USER, claim_groups=[claimed], display=DISPLAY) == PLATFORM_ROLE_OPERATOR
+
+
+def test_the_in_memory_sync_keeps_the_last_active_operator_too():
+    store = InMemoryOrgStore()
+    sync = InMemoryPlatformRoleSync(store, admin_group=ADMIN_GROUP)
+    sync.reconcile(user_id=USER, claim_groups=[ADMIN_GROUP], display=DISPLAY)
 
     assert sync.reconcile(user_id=USER, claim_groups=[], display=DISPLAY) == PLATFORM_ROLE_OPERATOR
     assert store.resolve_principal(USER).platform_role == PLATFORM_ROLE_OPERATOR

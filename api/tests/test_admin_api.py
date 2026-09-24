@@ -180,6 +180,40 @@ async def test_hub_usage_is_operator_only_and_spans_organizations(tmp_path, idp:
 
 
 @pytest.mark.asyncio
+async def test_a_usage_window_without_a_timezone_is_refused_not_a_500(tmp_path, idp: _StubIdp):
+    """A naive time cannot be compared with stored aware times in memory, and
+    Postgres would read it in its own session timezone. Neither is an answer."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.usage_store.record_event("org-a", "default", "u-1", "chat")
+        await sign_in(client, idp, next_path="/web")
+        naive = await client.get("/admin/api/usage?since=2026-09-01T00:00:00")
+        aware = await client.get("/admin/api/usage?since=2026-09-01T00:00:00Z")
+
+    assert naive.status_code == 422
+    assert aware.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_an_organization_with_events_but_no_roster_row_is_still_listed(tmp_path, idp: _StubIdp):
+    """Otherwise its events count in the total but appear under no organization."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.usage_store.record_event("org-c", "default", "u-9", "chat")
+        await sign_in(client, idp, next_path="/web")
+        body = (await client.get("/admin/api/usage")).json()
+
+    assert body["events_total"] == 1
+    assert {org["org_id"]: org["events"] for org in body["organizations"]} == {"org-c": 1}
+
+
+@pytest.mark.asyncio
 async def test_connectors_are_listed_without_any_secret_reaching_the_browser(tmp_path, idp: _StubIdp):
     app = build_app(tmp_path, idp)
     secret = "slack-static-token-value"
@@ -209,9 +243,9 @@ class StubDirectory:
         self._users = users
         self.queries: list[str | None] = []
 
-    def search_users(self, query=None, *, limit=50):
+    def search_users(self, query=None, *, limit=50, first=0):
         self.queries.append(query)
-        return self._users[:limit]
+        return self._users[first : first + limit]
 
 
 @pytest.mark.asyncio
@@ -426,6 +460,59 @@ async def test_invitations_are_listed_for_the_panel(tmp_path, idp: _StubIdp):
     assert [row["status"] for row in rows] == ["pending"]
     # The one-time secret never leaves the service on a listing.
     assert "secret" not in response.text and "token" not in response.text
+
+
+class ManyInvitations(StubInvitations):
+    """Enough invitations to need more than one page, served by offset."""
+
+    def __init__(self, count):
+        super().__init__()
+        self.count = count
+
+    def list_all(self, *, limit, offset):
+        from datetime import datetime, timedelta, timezone
+
+        from collab_hub_api.frames.invitations import Invitation, InvitationPage
+
+        now = datetime.now(tz=timezone.utc)
+        ids = range(self.count - 1 - offset, max(self.count - 1 - offset - limit, -1), -1)
+        return InvitationPage(
+            invitations=[
+                Invitation(
+                    id=f"inv-{n}",
+                    email=f"user{n}@example.com",
+                    org_id=None,
+                    status="pending",
+                    created_at=now,
+                    expires_at=now + timedelta(days=3),
+                    accepted_at=None,
+                    created_by="u-1",
+                )
+                for n in ids
+            ],
+            has_more=offset + limit < self.count,
+        )
+
+
+@pytest.mark.asyncio
+async def test_every_invitation_can_be_reached_page_by_page(tmp_path, idp: _StubIdp):
+    """``has_more`` alone left no way to fetch the rest past the first page."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.invitation_service = ManyInvitations(250)
+        await sign_in(client, idp, next_path="/web")
+        seen: list[str] = []
+        path = "/admin/api/invitations"
+        while path:
+            body = (await client.get(path)).json()
+            seen += [row["id"] for row in body["invitations"]]
+            cursor = body["next_offset"]
+            path = f"/admin/api/invitations?offset={cursor}" if cursor is not None else ""
+
+    assert seen == [f"inv-{n}" for n in range(249, -1, -1)]
 
 
 @pytest.mark.asyncio
@@ -756,6 +843,28 @@ async def test_the_users_listing_reads_every_role_at_once(tmp_path, idp: _StubId
         "u-5": (None, None),
     }
     assert not {"u-2", "u-3", "u-4", "u-5"} & set(per_person)
+
+
+@pytest.mark.asyncio
+async def test_everyone_in_the_directory_can_be_reached_page_by_page(tmp_path, idp: _StubIdp):
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    app = build_app(tmp_path, idp)
+    people = [UserDirectoryUser(id=f"u-{n}", username=f"user{n}", email=None) for n in range(120)]
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.user_directory_client = StubDirectory(people)
+        await sign_in(client, idp, next_path="/web")
+        seen: list[str] = []
+        path = "/admin/api/users?limit=50"
+        while path:
+            body = (await client.get(path)).json()
+            seen += [row["id"] for row in body["users"]]
+            cursor = body["next_first"]
+            path = f"/admin/api/users?limit=50&first={cursor}" if cursor is not None else ""
+
+    assert seen == [person.id for person in people]
 
 
 class RecordingConnectorStore:
