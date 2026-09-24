@@ -608,6 +608,94 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        11,
+        (
+            # The Cog catalog (issue #84): one row per artifact the indexer has
+            # seen in a configured registry source, keyed by content digest.
+            #
+            # **Identity is the digest.** PRIMARY KEY (source_id, repository,
+            # digest) because the same bytes may legitimately be published to
+            # several repositories (and enumerated by several sources), and
+            # each such location is its own row; `cog_id`/`name` are search
+            # keys read out of the Cog's own declarations, and the repository
+            # path is NOT identity -- published repository names carry an id
+            # suffix and are free to change. `host` is the registry host of
+            # the source's *external* URL, so `<host>/<repository>@<digest>`
+            # is the pinned install reference and can be rebuilt from the row.
+            #
+            # `card` is the bundle reader's output, verbatim, as structured
+            # JSON: the whole profile is preserved (requires/provides/io stay
+            # objects, not strings), which is what the GIN index below makes
+            # filterable. `status` says what kind of row this is:
+            #   indexed  -- the reader produced a card (errors and all: a
+            #               draft or a broken profile is still a Cog);
+            #   non_cog  -- the manifest carries no COG.md (and no Prog
+            #               pixi.toml), recorded with a reason so a
+            #               repository full of images is not re-read every
+            #               sweep;
+            #   failed   -- the fetch or read failed; `read_errors` says how,
+            #               and the next sweep retries it.
+            # `read_errors` duplicates card.errors for indexed rows so a
+            # "what is broken" query never has to open the card.
+            #
+            # `removed_at` is NULL while the digest is present in the
+            # registry. Rows are never deleted by application code: an install
+            # or a run may reference a digest long after its publisher removed
+            # it, and "this once existed and is now gone" is an answer the
+            # catalog must be able to give.
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_artifacts (
+                source_id            text NOT NULL,
+                host                 text NOT NULL,
+                repository           text NOT NULL,
+                digest               text NOT NULL,
+                tags                 text[] NOT NULL DEFAULT '{}',
+                pushed_at            timestamptz,
+                indexed_at           timestamptz NOT NULL DEFAULT now(),
+                manifest_media_type  text,
+                status               text NOT NULL
+                                     CHECK (status IN ('indexed', 'non_cog', 'failed')),
+                card                 jsonb,
+                cog_id               text,
+                name                 text,
+                version              text,
+                kind                 text,
+                publisher            text,
+                manifest_schema      text,
+                read_errors          jsonb NOT NULL DEFAULT '[]'::jsonb,
+                removed_at           timestamptz,
+                PRIMARY KEY (source_id, repository, digest)
+            )
+            """,
+            # "Every version of this Cog" (removed ones included) starts from
+            # cog_id, so that index is full; "every model Cog" from kind. The
+            # catalog's other reads -- the newest present row per Cog, the
+            # present rows per repository -- exclude removed rows, so a partial
+            # index on the present rows keeps those cheap as the removed tail
+            # grows, and it is what "WHERE removed_at IS NULL" plans against.
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_artifacts_cog_id_idx
+            ON collab_cog_artifacts (cog_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_artifacts_kind_idx
+            ON collab_cog_artifacts (kind)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_artifacts_present_idx
+            ON collab_cog_artifacts (cog_id, repository) WHERE removed_at IS NULL
+            """,
+            # Containment filters over the structured card ("requires
+            # capability X", "provides Y", "accepts io Z") are `card @> ...`
+            # queries; jsonb_path_ops is the GIN operator class built for
+            # exactly that operator, and it is smaller than the default class.
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_artifacts_card_idx
+            ON collab_cog_artifacts USING GIN (card jsonb_path_ops)
+            """,
+        ),
+    ),
 )
 
 
