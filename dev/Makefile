@@ -116,6 +116,12 @@ DEV_AUTH_ENV := \
   DEV_AUTH_ORG=dev-org \
   DEV_AUTH_WORKSPACE=default
 
+# Level 1 only: the Cog catalog in process memory, so the catalog read API
+# (/v1/cogs) answers 200 with no database. Every other level rides Postgres,
+# where the catalog is durable; a deployment has no such switch.
+LEVEL1_ENV := \
+  COLLAB_HUB_API__COGS__CATALOG__BACKEND=memory
+
 # Real bearer verification against the local Keycloak realm.
 #
 # FRAMES_AUTH_IDENTITY_CLAIM=sub matches the production convention: the OIDC
@@ -223,10 +229,10 @@ help: ## Show this help
 # ---------------------------------------------------------------------------
 
 api: | $(LOCAL)/frames ## The API alone: no containers, dev auth, local-FS frames, in-memory stores
-	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) uv run python -m collab_hub_api
+	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) uv run python -m collab_hub_api
 
 api-watch: | $(LOCAL)/frames ## Same as `api` (no containers), restarted on every source change
-	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) \
+	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) \
 		uv run --with watchfiles watchfiles 'python -m collab_hub_api' src
 
 # ---------------------------------------------------------------------------
@@ -536,6 +542,8 @@ test: ## Run the API test suite
 lint: ## Lint the Helm chart and validate the rendered manifests
 	helm lint $(ROOT)/helm/collab-hub
 	helm template $(ROOT)/helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
+	helm template $(ROOT)/helm/collab-hub -f $(ROOT)/helm/collab-hub/ci/cogs-values.yaml | kubeconform -strict -ignore-missing-schemas -
+	$(ROOT)/scripts/chart_render_tests.sh
 
 clean: ## Remove local frame content and caches (leaves docker volumes alone)
 	rm -rf $(LOCAL)

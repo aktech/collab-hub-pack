@@ -167,10 +167,19 @@ environment, run its checks, resolve its requirements, record the binding,
 derive its catalog card. Distinct from materialize — installing does not
 start a worker. (Cog-execution README, "Materialize / worker".)
 
+**Install reference.** The pinned `<host>/<repository>@<digest>` of one
+indexed Cog version — what a client hands to `nebi import`, and what the
+catalog read API answers at `…/versions/{digest}/reference`. It names one
+location of the artifact; identity is the digest, so the same digest may have
+several install references across sources and repositories.
+([cog-registry.md](cog-registry.md#read-api).)
+
 **Interrupted.** The terminal status of a run that a host was advancing
 when it stopped, under a backend that cannot resume it (`none`). Recorded
 on the Track when the host next starts. The run is never resumed; retrying
-it is a new attempt. (ADR-0002 D2.)
+it continues the attempt that was in flight, under the same idempotency key,
+so a committed claim answers instead of the work running again. (ADR-0002 D2;
+[states](cog-execution/states.md).)
 
 **Keyed claim.** How a step executed again within the same attempt avoids
 repeating a side effect: each interaction carries an idempotency key for its
@@ -240,6 +249,19 @@ is the strictest value on each axis across the sources actually bound; a
 step's output label is at least the strictest of its inputs, absent a
 declared, Guard-verified, Gate-signed downgrade. (ADR-0001 D10, invariants
 6–7; sensitivity doc.)
+
+**State machines.** The four machines that hold every state of Cog
+execution, built on the state pattern: one class per state, the context
+delegating each event to its current state, and an event the state does not
+accept refused. A Cog's **install**: `PUBLISHED`, `FETCHED`, `BOUND`,
+`INVOKABLE`, `UNINSTALLED`. A **worker**: `MATERIALIZED`, `READY`,
+`INTERACTING`, `IDLE`, `TEARING_DOWN`, `TORN_DOWN`, `WORKER_FAILED`. A **step
+attempt** under the keyed claim: `INVOKED`, `RESERVED`, `COMMITTED`,
+`RECORDED`, `OUTCOME_UNKNOWN`. A **run**: `SUBMITTED`, `RUNNING`,
+`WAITING_AT_GATE`, `COMPLETED`, `FAILED`, `REJECTED`, `CANCELLED`,
+`BUDGET_EXCEEDED`, `INTERRUPTED`. A run's status is its Track replayed through
+the run machine. Each state is described in
+[states](cog-execution/states.md). (ADR-0002 D11; ADR-0001 invariant 3.)
 
 **Worker SDK.** An optional library that implements the worker side of the
 seam once — `/invoke` returning an envelope, the health probe, the keyed

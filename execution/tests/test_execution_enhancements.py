@@ -18,7 +18,7 @@ from collab_hub_execution import (
     PauseRequest,
     ResultEnvelope,
     RunBudget,
-    RunStatus,
+    RunState,
     TrackEvent,
     derive_run_status,
 )
@@ -46,7 +46,7 @@ def test_token_budget_survives_restart_and_stops_the_run():
         track=track,
         budget=budget,
     )
-    assert e1.submit(op) is RunStatus.PAUSED  # s1 consumes 60 (<100); s2 pauses
+    assert e1.submit(op) is RunState.WAITING_AT_GATE  # s1 consumes 60 (<100); s2 pauses
 
     state["paused"] = False
     e2 = DurableWorkflowEngine(
@@ -55,7 +55,7 @@ def test_token_budget_survives_restart_and_stops_the_run():
         budget=budget,
     )
     # fresh engine: reconstructed tracker already holds s1's 60; s2's 60 -> 120 > 100
-    assert e2.signal("run-budget", "approved") is RunStatus.BUDGET_EXCEEDED
+    assert e2.signal("run-budget", "approved") is RunState.BUDGET_EXCEEDED
     assert any(e.event_type == "budget_exceeded" for e in track.replay("run-budget"))
 
 
@@ -67,13 +67,16 @@ def test_duration_budget_stops_run_before_any_step_as_timed_out():
         budget=RunBudget(max_duration=timedelta(0)),
     )
     # a duration overrun is a timeout, distinct from token/cost overspend
-    assert engine.submit(OpDefinition("run-dur", (OpStep("s", "a", "run"),))) is RunStatus.TIMED_OUT
+    assert engine.submit(OpDefinition("run-dur", (OpStep("s", "a", "run"),))) is RunState.BUDGET_EXCEEDED
     assert any(e.event_type == "timed_out" for e in track.replay("run-dur"))
     assert not any(e.event_type == "budget_exceeded" for e in track.replay("run-dur"))
 
 
 def test_bounded_revise_loop_fails_after_max_revisions():
+    runs = []
+
     def always_pause(entry, value, *, signal=None):
+        runs.append(signal)
         raise PauseRequest("needs another revision")
 
     track = InMemoryTrackStore()
@@ -86,13 +89,65 @@ def test_bounded_revise_loop_fails_after_max_revisions():
             max_revisions=2,
         )
 
-    assert engine().submit(op) is RunStatus.PAUSED             # pause 1
-    assert engine().signal("run-revise", "fix a") is RunStatus.PAUSED   # pause 2
-    assert engine().signal("run-revise", "fix b") is RunStatus.FAILED   # exceeds max_revisions
+    assert engine().submit(op) is RunState.WAITING_AT_GATE             # pause 1
+    assert engine().signal("run-revise", "fix a") is RunState.WAITING_AT_GATE   # pause 2
+    assert engine().signal("run-revise", "fix b") is RunState.FAILED   # exceeds max_revisions
     assert any(
-        e.event_type == "failed" and e.payload.get("error") == "RevisionLimitExceeded"
+        e.event_type == "failed" and e.payload.get("error") == "revise_limit_exceeded"
         for e in track.replay("run-revise")
     )
+    # max_revisions=2 is two revisions: the step runs three times, and fails when it asks for a third.
+    assert len(runs) == 3
+
+
+@pytest.mark.parametrize("max_revisions", [1, 2])
+def test_an_approving_signal_is_never_charged_as_a_revision(max_revisions):
+    signals = []
+
+    def reviewer(entry, value, *, signal=None):
+        signals.append(signal)
+        if signal is None or signal == "fix":
+            raise PauseRequest("review")
+        return ResultEnvelope.success({"approved": True})
+
+    track = InMemoryTrackStore()
+    engine = DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": reviewer}), track=track,
+                                   max_revisions=max_revisions)
+    op = OpDefinition("run-approve", (OpStep("s", "c", "review", "draft"),))
+    assert engine.submit(op) is RunState.WAITING_AT_GATE
+    for _ in range(max_revisions - 1):
+        assert engine.signal("run-approve", "fix") is RunState.WAITING_AT_GATE
+    # The last revision the limit allows is approved, and the run completes.
+    assert engine.signal("run-approve", {"approved": True}) is RunState.COMPLETED
+    assert signals[-1] == {"approved": True}
+
+
+@pytest.mark.parametrize("ending,state", [("rejected", "rejected"), ("cancelled", "cancelled")])
+def test_a_rejected_or_cancelled_run_is_refused_a_retry_before_anything_is_read_or_written(ending, state):
+    track = InMemoryTrackStore()
+    for kind, payload in (("op_submitted", {"op": {"run_id": "r", "steps": []}}), ("run_picked_up", {}),
+                          ("paused", {"step": "s"}), (ending, {"step": "s", "actor": "alice"})):
+        track.append(TrackEvent(run_id="r", event_type=kind, payload=payload))
+    before = track.replay("r")
+    engine = DurableWorkflowEngine(executor=InMemoryCogExecutor({}), track=track)
+    with pytest.raises(ValueError, match=f"was {state}; nothing to retry"):
+        engine.retry("r")
+    assert track.replay("r") == before
+
+
+def test_a_submission_reads_the_track_once_to_check_it_and_once_to_advance():
+    class CountingTrack(InMemoryTrackStore):
+        reads = 0
+
+        def replay(self, run_id, *, after_sequence=0):
+            CountingTrack.reads += 1
+            return super().replay(run_id, after_sequence=after_sequence)
+
+    track = CountingTrack()
+    engine = DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": lambda e, v: v}), track=track)
+    op = OpDefinition("run-reads", tuple(OpStep(f"s{i}", "c", "run") for i in range(3)))
+    assert engine.submit(op) is RunState.COMPLETED
+    assert CountingTrack.reads == 2
 
 
 def test_step_digest_is_recorded_and_survives_restart():
@@ -113,7 +168,7 @@ def test_step_digest_is_recorded_and_survives_restart():
     # restart: the op is reconstructed from the Track alone; the digest must round-trip
     state["paused"] = False
     restarted = DurableWorkflowEngine(executor=InMemoryCogExecutor({"cog": handler}), track=track)
-    assert restarted.signal("run-digest", "ok") is RunStatus.COMPLETED
+    assert restarted.signal("run-digest", "ok") is RunState.COMPLETED
     materialized = [e for e in track.replay("run-digest") if e.event_type == "materialized"]
     assert materialized and all(e.payload.get("digest") == "sha256:abc" for e in materialized)
 
@@ -133,7 +188,7 @@ def test_materialize_failure_is_recorded_durably_not_left_hanging():
     track = InMemoryTrackStore()
     engine = DurableWorkflowEngine(executor=_FailingMaterializeExecutor(), track=track)
     status = engine.submit(OpDefinition("run-mat", (OpStep("s", "c", "run"),)))
-    assert status is RunStatus.FAILED
+    assert status is RunState.FAILED
     events = [e.event_type for e in track.replay("run-mat")]
     assert "failed" in events and "completed" not in events  # terminal, not stuck
 
@@ -223,8 +278,8 @@ def test_crash_recovery_resumes_with_the_same_key_so_the_side_effect_runs_once()
     op = OpDefinition("run-idem", (OpStep("s", "c", "run"),))
     with pytest.raises(SystemExit):  # process dies mid-step; run left non-terminal
         engine.submit(op)
-    assert engine.observe("run-idem") not in (RunStatus.COMPLETED, RunStatus.FAILED)
-    assert engine.submit(op) is RunStatus.COMPLETED  # resume re-drives with the SAME key
+    assert engine.observe("run-idem") not in (RunState.COMPLETED, RunState.FAILED)
+    assert engine.submit(op) is RunState.COMPLETED  # resume re-drives with the SAME key
     assert worker.side_effects == ["run-idem:s:0"]  # performed exactly once
 
 
@@ -241,9 +296,9 @@ def test_re_submitting_a_failed_run_is_a_no_op_not_a_silent_re_execution():
     track = InMemoryTrackStore()
     engine = DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": fail}), track=track)
     op = OpDefinition("run-term", (OpStep("s", "c", "run"),))
-    assert engine.submit(op) is RunStatus.FAILED
+    assert engine.submit(op) is RunState.FAILED
     before = len(track.replay("run-term"))
-    assert engine.submit(op) is RunStatus.FAILED  # immutable: no re-drive
+    assert engine.submit(op) is RunState.FAILED  # immutable: no re-drive
     assert calls["n"] == 1                          # the step did NOT run again
     assert len(track.replay("run-term")) == before  # no new events appended
 
@@ -279,8 +334,8 @@ def test_retry_re_drives_a_failed_run_under_a_fresh_key():
     ex = _RetryProbeExecutor()
     engine = DurableWorkflowEngine(executor=ex, track=InMemoryTrackStore())
     op = OpDefinition("run-retry", (OpStep("s", "c", "run"),))
-    assert engine.submit(op) is RunStatus.FAILED
-    assert engine.retry("run-retry") is RunStatus.COMPLETED
+    assert engine.submit(op) is RunState.FAILED
+    assert engine.retry("run-retry") is RunState.COMPLETED
     # explicit retry is a new attempt -> fresh key, so the work genuinely re-runs
     assert ex.keys == ["run-retry:s:0", "run-retry:s:1"]
 
@@ -290,7 +345,7 @@ def test_retry_rejects_a_non_terminal_run():
         raise PauseRequest("hold")
 
     engine = DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": gate}), track=InMemoryTrackStore())
-    assert engine.submit(OpDefinition("run-paused", (OpStep("s", "c", "run"),))) is RunStatus.PAUSED
+    assert engine.submit(OpDefinition("run-paused", (OpStep("s", "c", "run"),))) is RunState.WAITING_AT_GATE
     with pytest.raises(ValueError):
         engine.retry("run-paused")
 
@@ -299,7 +354,7 @@ def test_retry_rejects_a_completed_run():
     engine = DurableWorkflowEngine(
         executor=InMemoryCogExecutor({"c": lambda e, v: v}), track=InMemoryTrackStore()
     )
-    assert engine.submit(OpDefinition("run-ok", (OpStep("s", "c", "run"),))) is RunStatus.COMPLETED
+    assert engine.submit(OpDefinition("run-ok", (OpStep("s", "c", "run"),))) is RunState.COMPLETED
     with pytest.raises(ValueError):  # nothing to retry; re-running finished work is a new Op
         engine.retry("run-ok")
 
@@ -323,14 +378,14 @@ def test_re_submitting_a_paused_run_does_not_resume_it_behind_the_gate():
         return DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": gate}), track=track)
 
     op = OpDefinition("run-gate", (OpStep("s", "c", "run", "x"),))
-    assert engine().submit(op) is RunStatus.PAUSED
+    assert engine().submit(op) is RunState.WAITING_AT_GATE
     assert calls["n"] == 1
     # a re-submit must NOT re-invoke the gated step (that would bypass the gate)
-    assert engine().submit(op) is RunStatus.PAUSED
+    assert engine().submit(op) is RunState.WAITING_AT_GATE
     assert calls["n"] == 1
     # the gate opens only through signal(), which carries the decision value
     state["approved"] = True
-    assert engine().signal("run-gate", "go") is RunStatus.COMPLETED
+    assert engine().signal("run-gate", "go") is RunState.COMPLETED
 
 
 # --- duration budget must survive a crash immediately after submission ---
@@ -356,7 +411,7 @@ def test_duration_budget_survives_a_crash_after_submission():
     )
     # recovery anchors elapsed time to op_submitted (an hour ago), not now, so the
     # 5-minute duration budget is correctly seen as exceeded (a timeout)
-    assert engine.submit(op) is RunStatus.TIMED_OUT
+    assert engine.submit(op) is RunState.BUDGET_EXCEEDED
 
 
 # --- signal values are durable and recovered from the Track ---
@@ -382,11 +437,11 @@ def test_signal_value_is_durable_across_a_crash_mid_resume():
         return DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": handler}), track=track)
 
     op = OpDefinition("run-sig", (OpStep("s", "c", "review", "draft-v1"),))
-    assert engine().submit(op) is RunStatus.PAUSED
+    assert engine().submit(op) is RunState.WAITING_AT_GATE
     with pytest.raises(SystemExit):  # crash while resuming with the approval
         engine().signal("run-sig", approval)
     # Recovery must preserve both input and approval from the Track.
-    assert engine().submit(op) is RunStatus.COMPLETED
+    assert engine().submit(op) is RunState.COMPLETED
     assert seen == [("draft-v1", approval), ("draft-v1", approval)]
 
 
@@ -405,8 +460,8 @@ def test_signal_can_resume_a_step_with_an_explicit_none():
         return DurableWorkflowEngine(executor=InMemoryCogExecutor({"c": handler}), track=track)
 
     op = OpDefinition("run-none", (OpStep("s", "c", "run", "GATE"),))
-    assert engine().submit(op) is RunStatus.PAUSED
-    assert engine().signal("run-none", None) is RunStatus.COMPLETED
+    assert engine().submit(op) is RunState.WAITING_AT_GATE
+    assert engine().signal("run-none", None) is RunState.COMPLETED
     assert seen == [("GATE", None)]
 
 
@@ -453,10 +508,11 @@ def test_idempotency_keys_are_injective_across_ids_containing_the_delimiter():
 
 def test_between_steps_status_is_running_not_tearing_down():
     per_step = ["step_started", "materialized", "ready", "interaction_started", "idle", "teardown_started"]
-    events = [TrackEvent(run_id="r", event_type=t) for t in [*per_step, "step_completed"]]
-    assert derive_run_status(events) is RunStatus.RUNNING  # between steps, still progressing
+    kinds = ["op_submitted", "run_picked_up", *per_step, "step_completed"]
+    events = [TrackEvent(run_id="r", event_type=t) for t in kinds]
+    assert derive_run_status(events) is RunState.RUNNING  # between steps, still progressing
     events.append(TrackEvent(run_id="r", event_type="completed"))
-    assert derive_run_status(events) is RunStatus.COMPLETED  # the final event still wins
+    assert derive_run_status(events) is RunState.COMPLETED  # the final event still wins
 
 
 # --- budget limits are inclusive: reaching exactly the max stops the run ---
@@ -468,7 +524,7 @@ def test_budget_boundary_is_inclusive_so_exact_max_is_exceeded():
         track=InMemoryTrackStore(),
         budget=RunBudget(max_tokens=60),
     )
-    assert engine.submit(OpDefinition("run-exact", (OpStep("s", "c", "run"),))) is RunStatus.BUDGET_EXCEEDED
+    assert engine.submit(OpDefinition("run-exact", (OpStep("s", "c", "run"),))) is RunState.BUDGET_EXCEEDED
 
 
 class _TeardownFailsExecutor:
@@ -489,10 +545,29 @@ def test_teardown_failure_fails_the_run_rather_than_reporting_success():
     track = InMemoryTrackStore()
     engine = DurableWorkflowEngine(executor=_TeardownFailsExecutor(), track=track)
     status = engine.submit(OpDefinition("run-td", (OpStep("s", "c", "run"),)))
-    assert status is RunStatus.FAILED  # a leaked worker is not success
+    assert status is RunState.FAILED  # a leaked worker is not success
     events = [e.event_type for e in track.replay("run-td")]
     assert "teardown_failed" in events and "completed" not in events
     assert any(
         e.event_type == "failed" and e.payload.get("error") == "TeardownFailed"
         for e in track.replay("run-td")
     )
+
+
+def test_a_failed_worker_that_cannot_be_reclaimed_is_recorded_on_the_run_not_around_its_machine():
+    class _Broken(_TeardownFailsExecutor._Worker):
+        def interact(self, entry_point, input=None, idempotency_key=None):
+            raise ConnectionError("pod went away")
+
+    class _Executor(_TeardownFailsExecutor):
+        def materialize(self, cog, run_id, instance=""):
+            return _Broken()
+
+    track = InMemoryTrackStore()
+    engine = DurableWorkflowEngine(executor=_Executor(), track=track)
+    assert engine.submit(OpDefinition("run-lost", (OpStep("s", "c", "run"),))) is RunState.FAILED
+    events = track.replay("run-lost")
+    assert "teardown_failed" not in [e.event_type for e in events]  # the worker had already failed
+    [failed] = [e for e in events if e.event_type == "failed"]
+    assert failed.payload == {"step": "s", "error": "TeardownFailed", "reason": "RuntimeError",
+                              "worker_error": "ConnectionError"}
