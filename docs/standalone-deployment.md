@@ -204,6 +204,23 @@ combination, but not restating the list is the better habit.)
   append an override rather than restate the map.
 - `defaultAccess` applies where no rule matches. Keep it `authenticated`: a
   route that ships without its own auth dependency then fails closed.
+- The API routes under `/v1` need no entry: the default covers them, and each
+  also carries its own auth dependency, so a `public` entry does not make
+  frames or tasks anonymous. The one exception is the Cog catalog: a `public`
+  rule at or below `/v1/cogs` opens anonymous discovery
+  ([cog-registry.md](cog-registry.md#read-api)). Under that rule a request
+  with no credentials gets the anonymous view. It omits `source_id` and the
+  cards' reader diagnostics (`errors`, `warnings`), and refuses the
+  `source_id` filter with 422 `validation_error`. So does a signed-in
+  subject for whom membership resolution finds no organization (platform
+  operators without one are accepted callers and get the full answer).
+  Credentials the API accepts get the full answer, and an `Authorization`
+  header or `IdToken-*` cookie that is present but empty counts as rejected
+  credentials, not as none.
+  Credentials it rejects, including a JWKS it cannot reach, get 401 as
+  anywhere else. For every caller, `GET /v1/cogs` list items carry a
+  trimmed card without `body`, `profile_raw` and `frontmatter_raw`, which
+  the per-version routes serve.
 
 ### Why `/web` and `/invite` ship public
 
