@@ -10,7 +10,7 @@ name: Dev Environment
 # levels themselves are meant to be used:
 #
 #   level 1  both macOS and Linux, no containers at all      ~1 min
-#   level 2  Linux, Postgres + MinIO                         ~2 min
+#   level 2  Linux, Postgres + the S3 frame store            ~2 min
 #   level 3  Linux, + Keycloak (the one heavy image)         ~3 min
 #   level 4  rendered only -- no cluster, no node image      ~1 min
 #
@@ -164,6 +164,16 @@ jobs:
           view=$(curl -sfS -m 10 http://127.0.0.1:8000/v1/cogs/catalog.v1.json)
           [ "$view" = '{"schemaVersion":1,"repositories":[]}' ] \
             || { echo "GET /v1/cogs/catalog.v1.json returned $view"; exit 1; }
+
+          # The Track tables (migration 12) come from the migration registry the
+          # API ran at startup and from nowhere else: the API never imports the
+          # execution package, so nothing else could have created them.
+          psql='docker compose -f dev/compose.yaml exec -T postgres psql -U collab -d collab -tAc'
+          tables=$($psql "SELECT count(*) FROM pg_tables WHERE tablename IN ('collab_track_events', 'collab_track_payloads')")
+          [ "$tables" = "2" ] || { echo "expected the two Track tables from migrations, found $tables"; exit 1; }
+          applied=$($psql "SELECT max(version) FROM collab_schema_migrations")
+          [ "$applied" -ge 12 ] || { echo "expected migration 12 applied, latest is $applied"; exit 1; }
+          if grep -rq "collab_hub_execution" api/src; then echo "the API must not import the execution package"; exit 1; fi
 
           pkill -f "collab_hub_api" || true
           sleep 2
