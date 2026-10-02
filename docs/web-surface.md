@@ -194,8 +194,10 @@ elsewhere" shape as `web_platform_role_source_missing`.
 - **Headers:** every response on a guarded path carries
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and a CSP with
-  `default-src 'none'`, `frame-ancestors 'none'`, `form-action 'self'`, and
-  **no script source**. The server-rendered pages serve no JavaScript. Two
+  `default-src 'none'`, `frame-ancestors 'none'`, `form-action 'self'`,
+  `img-src 'self'` and `font-src 'self'` (the wordmark and the typeface are
+  served from this origin), and **no script source**. The server-rendered
+  pages serve no JavaScript. Two
   built bundles are the path-scoped exceptions, and they share one policy,
   `ADMIN_PANEL_CONTENT_SECURITY_POLICY` (`web/pages.py`):
   `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`.

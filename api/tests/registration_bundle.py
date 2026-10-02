@@ -1,9 +1,9 @@
 """A stand-in for the built registration bundle, for tests that serve it.
 
 The real bundle is built by ``admin-ui`` (``npm run build``) into
-``<dist>/registration``. These tests cover placement, gating and headers, so
-they need files of the right shape in the right place and nothing more; what
-the app renders is the front-end suite's business.
+``<dist>/registration``. The tests that use this cover placement, gating and
+headers, so they need files of the right shape in the right place and nothing
+more; what the app renders is the front-end suite's business.
 """
 
 from __future__ import annotations
@@ -29,4 +29,8 @@ def built_dist(tmp_path: Path) -> Path:
     (bundle / "index.html").write_text(SHELL)
     (bundle / "assets" / "index-abc123.js").write_text("console.log('registration')")
     (bundle / "assets" / "index-abc123.css").write_text("body{margin:0}")
+    # The typeface files the build keeps under stable names, which the
+    # server-rendered pages' stylesheet refers to as well.
+    for weight in (400, 500, 600):
+        (bundle / "assets" / f"ibm-plex-sans-latin-{weight}-normal.woff2").write_bytes(b"wOF2 stand-in")
     return dist

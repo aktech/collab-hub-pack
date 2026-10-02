@@ -26,6 +26,12 @@ from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import get_route_path
 
+from .surface import (
+    ADMIN_INVITATIONS_PATH,
+    ADMIN_PANEL_DOCUMENT,
+    LANDING_PATH,
+    ORG_INVITATIONS_PATH,
+)
 from .surface import STYLE_ASSET_PATH as STYLE_PATH
 from .surface import WEB_LOGO_PATH as LOGO_PATH
 
@@ -50,16 +56,17 @@ SECURITY_HEADERS = {
 intermediary treats the whole surface alike."""
 
 CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; style-src 'self'; img-src 'self'; "
+    "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; "
     "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 """No script source at all: the surface serves none, so none may run.
 
-``img-src`` is ``'self'`` rather than ``'none'``: these pages carry the product
-wordmark, served from this origin by the route that serves the stylesheet.
-Widened by exactly one source, and not to a brand CDN -- a page that fetches
-its own chrome from a third party hands that third party a view of who is
-opening it.
+``img-src`` and ``font-src`` are ``'self'`` rather than ``'none'``: these pages
+carry the product wordmark and are set in the product's typeface, both served
+from this origin (the wordmark by the route beside the stylesheet, the font
+files by the registration bundle). Widened to this origin only, and not to a
+brand or font CDN -- a page that fetches its own chrome from a third party hands
+that third party a view of who is opening it.
 
 ``form-action 'self'`` keeps a markup-injection bug from redirecting a POST
 (and the CSRF token in it) off-origin. Documents only — assets get the plain
@@ -152,47 +159,136 @@ def headers_for_path(path: str) -> dict[str, str]:
 
 
 STYLESHEET = """\
-:root { color-scheme: light dark; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-       Helvetica, Arial, sans-serif; margin: 4rem auto; max-width: 40rem;
-       padding: 0 1.25rem; color: #1a1a2e; line-height: 1.55; }
-h1 { font-size: 1.35rem; margin: 0 0 1rem; }
-p { margin: 0 0 0.9rem; }
-a { color: #3452d9; }
-.brand { margin-bottom: 2rem; }
-.brand img { height: 2rem; width: auto; display: block; }
-.identity { color: #666; font-size: 0.85rem; margin-top: 3rem;
-            border-top: 1px solid #ddd; padding-top: 1rem; }
-.identity form { display: inline; }
-button { font: inherit; background: #3452d9; color: #fff; border: 0;
-         border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; }
-button.link { background: none; color: #3452d9; padding: 0;
-              text-decoration: underline; }
-dl { margin: 0 0 1rem; }
-dt { color: #666; font-size: 0.8rem; margin-top: 0.75rem; }
-dd { margin: 0.15rem 0 0; }
-h2 { font-size: 1.05rem; margin: 2rem 0 0.75rem; }
-label { display: block; font-size: 0.8rem; color: #666; margin-bottom: 0.25rem; }
-input[type="email"], input[type="text"] { font: inherit; width: 100%; box-sizing: border-box;
-       padding: 0.5rem; border: 1px solid #bbb; border-radius: 6px;
-       margin-bottom: 0.75rem; background: transparent; color: inherit; }
-.notice { border-left: 3px solid #3452d9; padding-left: 0.75rem; }
-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
-th { text-align: left; color: #666; font-weight: 600; }
-th, td { border-bottom: 1px solid #ddd; padding: 0.4rem 0.5rem 0.4rem 0; }
-form.inline { display: inline; }
+/* The server-rendered pages, in the same face and colours as the React
+   bundles beside them (admin-ui/src/tokens.css is the other copy of these
+   values; the two surfaces of one product must not disagree about what blue
+   means). Fonts are the registration bundle's own files, served from this
+   origin: no font host, and a hub with no internet egress still renders them.
+   Nothing in this interface is capitalised for emphasis. */
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url(../invite/assets/ibm-plex-sans-latin-400-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url(../invite/assets/ibm-plex-sans-latin-500-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url(../invite/assets/ibm-plex-sans-latin-600-normal.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+:root {
+  color-scheme: light dark;
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --ink: #1a1a2e; --ink-soft: #666; --accent: #3452d9; --line: #ddd;
+  --warn: #8a2f2f; --page: #fff; --on-accent: #fff; --tint: rgba(52, 82, 217, 0.06);
+}
 @media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e8f0; --ink-soft: #9a9aa8; --accent: #96a9ff; --line: #3a3a48;
+    --warn: #ff9b9b; --page: #111116; --on-accent: #14161c; --tint: rgba(150, 169, 255, 0.08);
+  }
   /* The only wordmark that ships is navy and vanishes on a dark background;
      flattening and inverting gives a white mark of the same shape. The panel
      and the desktop client do the same. */
   .brand img { filter: brightness(0) invert(1); }
-  body { color: #e8e8f0; }
-  .brand, .identity, dt, label, th { color: #9a9aa8; }
-  .identity { border-top-color: #3a3a48; }
-  a, button.link { color: #96a9ff; }
-  input[type="email"], input[type="text"] { border-color: #4a4a58; }
-  th, td { border-bottom-color: #3a3a48; }
 }
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+       font-family: var(--font-sans); font-size: 15px; line-height: 1.55; }
+h1 { font-size: 1.35rem; font-weight: 600; line-height: 1.3; margin: 0 0 0.75rem; }
+h2 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 0.75rem; }
+p { margin: 0 0 1rem; }
+a { color: var(--accent); text-underline-offset: 0.15em; }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mono { font-family: var(--font-mono); }
+
+/* A page with nobody signed in (the signed-out notice, the public documents)
+   stands alone: one readable column with the same margin on every side. */
+.standalone { max-width: 38rem; margin: 0 auto; padding: 4rem 1.5rem; font-size: 16px; line-height: 1.6; }
+.standalone h1 { font-size: 1.5rem; margin-bottom: 1.25rem; }
+.standalone .brand { margin-bottom: 3rem; }
+.brand img, .wordmark { height: 2.25rem; width: auto; display: block; }
+
+/* The signed-in frame: the admin panel's header, side navigation and main
+   column (admin-ui/src/styles.css, sections.css), so the two surfaces read as
+   one product. */
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+.header { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem;
+          padding: 1rem 1.75rem; border-bottom: 1px solid var(--line); }
+.header-brand { display: flex; align-items: center; gap: 0.85rem; min-width: 0; }
+.header-surface { font-size: 0.9rem; color: var(--ink-soft); padding-left: 0.85rem;
+                  border-left: 1px solid var(--line); }
+.header-identity { display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem; min-width: 0; }
+.header-identity .who { color: var(--ink); overflow-wrap: anywhere; }
+.avatar { flex: none; display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%;
+          background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent);
+          font-size: 0.75rem; font-weight: 600; user-select: none; }
+.shell { display: grid; grid-template-columns: 15rem 1fr; flex: 1; }
+.nav { border-right: 1px solid var(--line); padding: 1.5rem 1rem; display: flex; flex-direction: column; gap: 1.75rem; }
+.nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.125rem; }
+.navlink { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; border-radius: 6px;
+           color: var(--ink); text-decoration: none; font-size: 0.9rem; }
+.navlink:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.nav svg { flex: none; color: var(--ink-soft); }
+.navlink:hover svg { color: var(--ink); }
+.navlink.current { background: color-mix(in srgb, var(--accent) 12%, transparent);
+                   color: var(--accent); font-weight: 600; }
+.navlink.current svg { color: var(--accent); }
+.main { padding: 2.5rem 2.5rem 4rem; max-width: 64rem; }
+.main p { color: var(--ink-soft); max-width: 44rem; }
+.main form { max-width: 34rem; }
+
+/* The landing page's destinations: each a block that is one link. */
+.destinations { display: grid; gap: 0.75rem; margin: 1.5rem 0 2rem; max-width: 44rem; }
+.destination { display: block; padding: 1.1rem 1.35rem; border: 1px solid var(--line);
+               border-radius: 12px; color: inherit; text-decoration: none; }
+.destination:hover { border-color: var(--accent); background: var(--tint); }
+.destination strong { display: block; color: var(--accent); font-weight: 600; margin-bottom: 0.2rem; }
+.destination span { color: var(--ink-soft); font-size: 0.95rem; }
+
+/* The one action a page is asking for. */
+button { font: inherit; font-weight: 500; background: var(--accent); color: var(--on-accent); border: 0;
+         border-radius: 6px; padding: 0.45rem 0.9rem; cursor: pointer; white-space: nowrap; }
+button:disabled { background: color-mix(in srgb, var(--ink) 12%, transparent);
+                  color: var(--ink-soft); cursor: default; }
+button.link { font-weight: 400; background: none; color: var(--accent); padding: 0;
+              text-decoration: underline; text-underline-offset: 0.15em; white-space: normal; }
+/* Icon-only controls carry their own accessible name, since there is no text
+   beside them to borrow one from. */
+button.icon-button { display: flex; align-items: center; justify-content: center; width: 2rem; height: 2rem;
+                     padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none;
+                     color: var(--ink-soft); }
+button.icon-button:hover { color: var(--ink); border-color: var(--ink-soft); }
+form.inline { display: inline; }
+
+dl { margin: 0 0 1rem; }
+dt { color: var(--ink-soft); font-size: 0.85rem; margin-top: 0.9rem; }
+dd { margin: 0.15rem 0 0; }
+label { display: block; font-size: 0.8rem; color: var(--ink-soft); margin-bottom: 0.35rem; }
+input[type="email"], input[type="text"] { font: inherit; width: 100%; padding: 0.5rem 0.75rem;
+       border: 1px solid var(--line); border-radius: 6px; margin-bottom: 0.9rem;
+       background: transparent; color: inherit; }
+
+/* What a page has to say about the last thing that happened. */
+.notice { border-left: 3px solid var(--accent); background: var(--tint); border-radius: 0 8px 8px 0;
+          padding: 0.85rem 1rem; margin: 0 0 1.25rem; max-width: 44rem; }
+.notice p:last-child { margin-bottom: 0; }
+
+table { border-collapse: collapse; width: 100%; margin: 1.25rem 0 2rem; font-size: 0.9rem; }
+th, td { text-align: left; padding: 0.5rem 0.6rem 0.5rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.8rem; color: var(--ink-soft); font-weight: 600; }
+.empty { color: var(--ink-soft); }
+
+/* Who is signed in, and the way out, on a standalone page. */
+.identity { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem 1rem;
+            margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+            color: var(--ink-soft); font-size: 0.9rem; }
+.identity strong { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+.identity form { display: inline; }
 """
 
 
@@ -272,36 +368,148 @@ class WebSecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+_ICON_LAYOUT_DASHBOARD = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect'
+    ' width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>'
+)
+_ICON_BUILDING_2 = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0'
+    ' 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 '
+    '0 1 2 2v16"/></svg>'
+)
+_ICON_MAIL = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/><rect x="2" y="4" width="20" height="16" '
+    'rx="2"/></svg>'
+)
+_ICON_SHIELD = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 '
+    '4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>'
+)
+_ICON_LOG_OUT = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>'
+)
+"""The icons the navigation shares with the admin panel (lucide, the package the
+panel draws from), inlined because these pages run no script. Decorative: every
+entry is labelled in words beside it."""
+
+NAVIGATION: tuple[tuple[str, str, str], ...] = (
+    (LANDING_PATH, "Overview", _ICON_LAYOUT_DASHBOARD),
+    (ORG_INVITATIONS_PATH, "Your organization's invitations", _ICON_BUILDING_2),
+    (ADMIN_INVITATIONS_PATH, "Invitations", _ICON_MAIL),
+    (ADMIN_PANEL_DOCUMENT, "Admin panel", _ICON_SHIELD),
+)
+"""Where the signed-in frame can take you: app-relative path, label, icon.
+
+Listed for everyone rather than resolved per role, for the reason the landing
+page has always linked both invitation pages: resolving a role here would add
+a store read to the one page that must never fail, and a person without the
+role gets the surface's 403 page, which says what to do about it.
+"""
+
+
+def initials(name: str | None, email: str | None) -> str:
+    """Two letters for the header circle, the way the panel picks them.
+
+    First and last name, never the middle; failing a name, the start of the
+    address. Never empty: an unlabelled blank reads as a rendering fault.
+    """
+
+    parts = (name or "").split()
+    if parts:
+        pair = parts[0][:1] + (parts[-1][:1] if len(parts) > 1 else "")
+        if pair:
+            return pair.upper()
+    address = (email or "").strip()
+    return address[:2].upper() if address else "?"
+
+
+def _shell(
+    *,
+    body: str,
+    root_path: str,
+    identity_label: str,
+    identity_email: str | None,
+    csrf_token: str,
+    current_path: str | None,
+) -> str:
+    """The signed-in frame: header, side navigation, main column."""
+
+    root = html.escape(root_path)
+    entries = ""
+    for path, label, icon in NAVIGATION:
+        current = ' current" aria-current="page' if path == current_path else ""
+        entries += (
+            f'<li><a class="navlink{current}" href="{root}{path}">{icon}{html.escape(label)}</a></li>'
+        )
+    return (
+        '<div class="app">'
+        '<header class="header">'
+        f'<div class="header-brand"><img class="wordmark" src="{root}{LOGO_PATH}" alt="OpenTeams Collab">'
+        '<span class="header-surface">Operations</span></div>'
+        '<div class="header-identity">'
+        f'<span class="avatar" aria-hidden="true">{html.escape(initials(identity_label, identity_email))}</span>'
+        f'<span class="who">{html.escape(identity_email or identity_label)}</span>'
+        f'<form class="inline" method="post" action="{root}/web/signout">'
+        f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
+        '<button type="submit" class="icon-button" title="Sign out" aria-label="Sign out">'
+        f"{_ICON_LOG_OUT}</button></form>"
+        "</div></header>"
+        '<div class="shell">'
+        f'<nav class="nav" aria-label="Sections"><ul>{entries}</ul></nav>'
+        f'<main class="main">{body}</main>'
+        "</div></div>"
+    )
+
+
 def render_page(
     *,
     title: str,
     body: str,
     root_path: str = "",
     identity_label: str | None = None,
+    identity_email: str | None = None,
     csrf_token: str | None = None,
+    current_path: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
 
-    ``body`` is trusted page markup composed by a route in this codebase —
+    ``body`` is trusted page markup composed by a route in this codebase --
     every request- or store-derived value must already be escaped by the
-    caller (:func:`escape` is the one to use). ``title`` and
-    ``identity_label`` are escaped here because they are routinely dynamic.
+    caller (:func:`escape` is the one to use). ``title``, ``identity_label``
+    and ``identity_email`` are escaped here because they are routinely dynamic.
 
-    When ``identity_label`` and ``csrf_token`` are given, the layout appends
-    the signed-in footer with the sign-out form; the CSRF token rides a
-    hidden field of that form, which is the pattern every future POST form on
-    this surface follows.
+    When ``identity_label`` and ``csrf_token`` are given the page is a
+    signed-in one and gets the admin panel's frame: the header names the
+    person and holds the sign-out form (whose hidden field carries the CSRF
+    token, the pattern every POST form on this surface follows), and the side
+    navigation lists this surface's destinations with ``current_path`` marked.
+    Otherwise the page stands alone in one centred column.
     """
 
-    footer = ""
     if identity_label is not None and csrf_token is not None:
-        footer = (
-            '<div class="identity">Signed in as '
-            f"<strong>{html.escape(identity_label)}</strong> · "
-            f'<form method="post" action="{html.escape(root_path)}/web/signout">'
-            f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
-            '<button type="submit" class="link">Sign out</button>'
-            "</form></div>"
+        content = _shell(
+            body=body,
+            root_path=root_path,
+            identity_label=identity_label,
+            identity_email=identity_email,
+            csrf_token=csrf_token,
+            current_path=current_path,
+        )
+    else:
+        content = (
+            '<div class="standalone">'
+            f'<div class="brand"><img src="{html.escape(root_path)}{LOGO_PATH}" alt="OpenTeams Collab"></div>'
+            f"<main>{body}</main></div>"
         )
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -314,11 +522,7 @@ def render_page(
 <link rel="stylesheet" href="{html.escape(root_path)}{STYLE_PATH}">
 </head>
 <body>
-<div class="brand"><img src="{html.escape(root_path)}{LOGO_PATH}" alt="OpenTeams Collab"></div>
-<main>
-{body}
-{footer}
-</main>
+{content}
 </body>
 </html>
 """

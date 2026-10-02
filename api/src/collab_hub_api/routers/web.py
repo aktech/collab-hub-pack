@@ -567,6 +567,9 @@ def make_router(
         """
 
         identity = session.name or session.email or session.user
+        # The header names the account by address, as the panel does; the
+        # page itself says who that is, so a person with several accounts can
+        # tell which one they are using before they act.
         rows = f"<dt>Signed in as</dt><dd>{escape(identity)}</dd>"
         if session.email and session.email != identity:
             rows += f"<dt>Email</dt><dd>{escape(session.email)}</dd>"
@@ -574,12 +577,16 @@ def make_router(
         body = (
             "<h1>Collab operations</h1>"
             "<p>This is the operations surface for this Collab deployment.</p>"
-            f'<p><a href="{root}{ADMIN_INVITATIONS_PATH}">Invitations</a>'
-            " — invite someone to this deployment, and revoke an invitation."
-            " Platform operators only.</p>"
-            f'<p><a href="{root}{ORG_INVITATIONS_PATH}">Your organization\'s'
-            " invitations</a> — invite someone into your organization, and"
-            " revoke an invitation. Organization owners only.</p>"
+            '<div class="destinations">'
+            f'<a class="destination" href="{root}{ADMIN_INVITATIONS_PATH}">'
+            "<strong>Invitations</strong>"
+            "<span>Invite someone to this deployment, and revoke an invitation."
+            " Platform operators only.</span></a>"
+            f'<a class="destination" href="{root}{ORG_INVITATIONS_PATH}">'
+            "<strong>Your organization's invitations</strong>"
+            "<span>Invite someone into your organization, and revoke an"
+            " invitation. Organization owners only.</span></a>"
+            "</div>"
             f"<dl>{rows}</dl>"
         )
         return page_response(
@@ -588,7 +595,9 @@ def make_router(
                 body=body,
                 root_path=_root_path(request),
                 identity_label=identity,
+                identity_email=session.email,
                 csrf_token=session.csrf,
+                current_path=LANDING_PATH,
             )
         )
 

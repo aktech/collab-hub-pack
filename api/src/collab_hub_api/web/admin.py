@@ -326,5 +326,7 @@ def invitations_page(
         body=body,
         root_path=root_path,
         identity_label=identity,
+        identity_email=session.email,
         csrf_token=session.csrf,
+        current_path=ADMIN_INVITATIONS_PATH,
     )

@@ -8,9 +8,26 @@ import { defineConfig } from "vite";
 //
 // `base` is relative for the reason it is in the panel's config: the API can be
 // served under a rootPath prefix, and absolute asset URLs would 404 there.
+//
+// Font files keep their own names (no content hash). The server-rendered pages
+// under `/web` are set in the same typeface and their stylesheet, written in
+// Python, refers to these files by name; a hash it cannot know would break
+// that. Nothing is lost: every response on the surface is `no-store`, so the
+// hash bought no cache busting here.
 export default defineConfig({
   root: "registration",
   base: "./",
   plugins: [react()],
-  build: { outDir: "../dist/registration", emptyOutDir: true },
+  build: {
+    outDir: "../dist/registration",
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        assetFileNames: (asset) => {
+          const name = asset.names?.[0] ?? "";
+          return /\.woff2?$/.test(name) ? "assets/[name][extname]" : "assets/[name]-[hash][extname]";
+        },
+      },
+    },
+  },
 });
