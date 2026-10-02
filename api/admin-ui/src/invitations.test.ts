@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { invitationNotice } from "./invitations";
+import { invitationNotice, organizationLabel, organizationNotice } from "./invitations";
 
 describe("invitationNotice", () => {
   it("reports a delivered invitation as sent", () => {
@@ -37,5 +37,24 @@ describe("invitationNotice", () => {
       text: "That did not go through. Nothing was created.",
       bad: true,
     });
+  });
+});
+
+describe("organizationLabel", () => {
+  it("names the organization and says how many people are in it", () => {
+    expect(organizationLabel({ name: "Acme Labs", members: 3 })).toBe("Acme Labs (3 people)");
+    expect(organizationLabel({ name: "Acme Labs", members: 1 })).toBe("Acme Labs (1 person)");
+    expect(organizationLabel({ name: null, members: 0 })).toBe("Unnamed organization (nobody yet)");
+  });
+});
+
+describe("organizationNotice", () => {
+  it("explains a refused name and a single-organization hub", () => {
+    expect(organizationNotice({ state: "refused", reason: "invalid_name" }).bad).toBe(true);
+    expect(organizationNotice({ state: "refused", reason: "invalid_name" }).text).toMatch(/not a name the hub will store/);
+    expect(organizationNotice({ state: "refused", reason: "organization_creation_refused" }).text).toMatch(
+      /single organization/,
+    );
+    expect(organizationNotice({ state: "error" })).toEqual({ text: "The organization was not created.", bad: true });
   });
 });

@@ -223,7 +223,7 @@ class FakeInvitationService:
         self.plain_create_calls.append({"email": email, "org_id": org_id})
         raise AssertionError("the operator page must call create_unless_live, not create")
 
-    def create_unless_live(self, ctx, *, email, org_id):
+    def create_unless_live(self, ctx, *, email, org_id, role=None):
         self._guard()
         self.issue_calls.append({"actor": ctx.user, "email": email, "org_id": org_id})
         if self.issue_result is not None:

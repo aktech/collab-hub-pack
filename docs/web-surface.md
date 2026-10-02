@@ -336,7 +336,11 @@ a protection the middleware does not itself enforce.
 | `GET /admin` | Redirects (308) to `/admin/`. The trailing slash matters: the panel's asset and API URLs are relative to the document. Session + `operator`. |
 | `GET /admin/` | The admin panel's document (`routers/admin_ui.py`), served from `web.admin_ui_dist`. Session + `operator`. Mounted only when that directory holds an `index.html`. |
 | `GET /admin/assets/*` | The panel's hashed bundle files. File names are checked against a strict pattern and must resolve inside the assets directory; anything else is 404. Session + `operator`. |
-| `/admin/api/*` | The panel's JSON API (`routers/admin_api.py`): session, models, model access, users and roles, connectors, usage, invitations and the audit log. Session + `operator`; every `POST` also needs the `X-CSRF-Token` header, whose value `GET /admin/api/session` returns. Refusals are JSON. |
+| `/admin/api/*` | The panel's JSON API (`routers/admin_api.py`): session, models, model access, users and roles, connectors, usage, invitations, organizations and the audit log. Session + `operator`; every `POST` also needs the `X-CSRF-Token` header, whose value `GET /admin/api/session` returns. Refusals are JSON. |
+| `GET /admin/api/invitations?org_id=` | The panel's invitation listing narrowed to one organization (the owner page's listing, paged the same way). Session + `operator`. |
+| `GET /admin/api/organizations` | Every organization, by name, with its active headcount; what the panel's invitation form and its listing filter offer. Session + `operator`. |
+| `POST /admin/api/organizations` | Creates a named, empty organization (`org.create`, operator as actor). Refuses a name the organization-name rule will not store (400) and a second organization on a single-organization hub (409). Session + `operator` + CSRF. |
+| `POST /admin/api/invitations` | Issues one invitation into the organization `org_id` names and emails the link, as a `member` or, with `role: owner`, as an owner. A body without `org_id` is refused (400 `organization_required`): the panel never issues an invitation that has no organization. Session + `operator` + CSRF. |
 | `GET /web/org/invitations` | The owner invitation page ([#142]). Session + org `owner`. |
 | `POST /web/org/invitations` | Issues one invitation into the caller's org and emails it. Refused (409) while the organization still carries the placeholder name ([#44]). Session + org `owner` + CSRF. |
 | `POST /web/org/invitations/revoke` | Revokes one of the caller's org's invitations. Session + org `owner` + CSRF. |
@@ -881,12 +885,28 @@ E scoped the operator surface to invitation issuance exactly.
 
 ### What the page does, and does not, create
 
-Every invitation issued here carries a **null `org_id`**. The organization is
-created atomically on first acceptance, with the accepter as its owner (Gate B,
-revised 2026-08-04), and there is no field on this page that can name one.
-Pre-creating an organization would leave an orphan behind every invitation that
-is revoked, expires, or is never accepted, and would move the `org.create`
-actor from the accepter to the operator.
+Every invitation issued from this server-rendered page carries a **null
+`org_id`**. The organization is created atomically on first acceptance, with
+the accepter as its owner (Gate B, revised 2026-08-04), and there is no field
+on this page that can name one.
+
+The **admin panel's** invitation screen follows the product rule instead:
+every invitation names its organization. Through the same service and the
+same `issue_invitation` action, an operator either creates a named
+organization first (`POST /admin/api/organizations`, recorded as `org.create`
+with the operator as actor and no `invitation_id` in its detail) or picks one
+that already exists, and then invites into it, choosing the role each
+invitation grants: `member`, or `owner` to seat the organization's first
+owner. The role is stored on the invitation row (`collab_invitations.role`,
+schema version 13) and granted at acceptance; a row with no stored role keeps
+the derived rule, owner of a new organization or member of an existing one. One
+address per invitation, as on the server-rendered page.
+
+Two things to know when inviting into an organization. A person belongs to
+exactly one organization, so somebody who already has a membership is refused
+at acceptance however they were invited. And the invitation email names no
+organization: its copy is organization-neutral by decision, so the operator
+tells people where they are being invited.
 
 ### One live invitation per address — issued *from this page*
 
