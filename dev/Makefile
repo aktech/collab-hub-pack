@@ -18,6 +18,8 @@ SHELL := /bin/bash
 
 ROOT        := $(abspath $(CURDIR)/..)
 API_DIR     := $(ROOT)/api
+CLI_DIR     := $(ROOT)/cli
+CLI         := $(CLI_DIR)/.venv/bin/collab-hub
 LOCAL       := $(CURDIR)/.local
 COMPOSE     := docker compose -f $(CURDIR)/compose.yaml
 ALL_PROFILES := --profile auth --profile fakes --profile desktop
@@ -234,6 +236,20 @@ api: | $(LOCAL)/frames ## The API alone: no containers, dev auth, local-FS frame
 api-watch: | $(LOCAL)/frames ## Same as `api` (no containers), restarted on every source change
 	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) \
 		uv run --with watchfiles watchfiles 'python -m collab_hub_api' src
+
+# ---------------------------------------------------------------------------
+## Level 1 — running Cogs and Ops
+# ---------------------------------------------------------------------------
+
+OP      ?= echo
+BACKEND ?= none
+
+# In process, no container: the fake Cogs under cogs/ answer in the same
+# process, over the SQLite Track in .local/. The execution package's own
+# environment runs it; PyYAML reads the Op.
+op: ## Run a fake Op in process and print its Track (OP=echo|needs-review|fails|slow|spender, BACKEND=none)
+	cd $(ROOT)/execution && uv run --quiet --with pyyaml python $(CURDIR)/op.py $(OP) \
+		--backend $(BACKEND) --track $(LOCAL)/track.sqlite
 
 # ---------------------------------------------------------------------------
 ## Level 2 — API with real datastores
@@ -461,6 +477,21 @@ seed-org: ## Seed dev-org + owner membership + operator grant (SUB= EMAIL=)
 
 psql: ## Open a psql shell on the dev database
 	$(COMPOSE) exec postgres psql -U collab -d collab
+
+# ---------------------------------------------------------------------------
+## The collab-hub CLI
+# ---------------------------------------------------------------------------
+
+# `login` signs in the way the desktop does -- authorization code with PKCE on
+# a 127.0.0.1 redirect, with the realm's apollo-desktop client -- so it needs a
+# browser on this machine; `--with-token` takes `make token` instead.
+cli: ## Install the collab-hub CLI into cli/.venv and print how to sign in at each level
+	cd $(CLI_DIR) && uv sync --quiet
+	@echo ""
+	@echo "  collab-hub is $(CLI)"
+	@echo "  level 1 (make api, dev auth):  $(CLI) --hub $(API_URL) whoami"
+	@echo "  level 3 (make api-oidc):       $(CLI) --hub $(API_URL) login"
+	@echo "  level 3 without a browser:     make -s -C dev token | $(CLI) --hub $(API_URL) login --with-token"
 
 # ---------------------------------------------------------------------------
 ## kind — the chart on a real cluster
