@@ -22,6 +22,7 @@ import html
 import logging
 from urllib.parse import quote
 
+from fastapi import Request, Response
 from fastapi.responses import HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import get_route_path
@@ -31,6 +32,7 @@ from .surface import (
     ADMIN_PANEL_DOCUMENT,
     LANDING_PATH,
     ORG_INVITATIONS_PATH,
+    THEME_PATH,
 )
 from .surface import STYLE_ASSET_PATH as STYLE_PATH
 from .surface import WEB_LOGO_PATH as LOGO_PATH
@@ -185,16 +187,28 @@ STYLESHEET = """\
   --ink: #1a1a2e; --ink-soft: #666; --accent: #3452d9; --line: #ddd;
   --warn: #8a2f2f; --page: #fff; --on-accent: #fff; --tint: rgba(52, 82, 217, 0.06);
 }
+/* The system says dark and nobody has chosen otherwise. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --ink: #e8e8f0; --ink-soft: #9a9aa8; --accent: #96a9ff; --line: #3a3a48;
     --warn: #ff9b9b; --page: #111116; --on-accent: #14161c; --tint: rgba(150, 169, 255, 0.08);
   }
   /* The only wordmark that ships is navy and vanishes on a dark background;
      flattening and inverting gives a white mark of the same shape. The panel
      and the desktop client do the same. */
-  .brand img { filter: brightness(0) invert(1); }
+  :root:not([data-theme="light"]) .brand img,
+  :root:not([data-theme="light"]) .wordmark { filter: brightness(0) invert(1); }
 }
+/* An explicit choice, recorded by the switch in the header, outranks the
+   system in both directions. The same cookie the admin panel reads. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ink: #e8e8f0; --ink-soft: #9a9aa8; --accent: #96a9ff; --line: #3a3a48;
+  --warn: #ff9b9b; --page: #111116; --on-accent: #14161c; --tint: rgba(150, 169, 255, 0.08);
+}
+:root[data-theme="dark"] .brand img, :root[data-theme="dark"] .wordmark { filter: brightness(0) invert(1); }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="light"] .brand img, :root[data-theme="light"] .wordmark { filter: none; }
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--ink);
@@ -264,6 +278,13 @@ button.icon-button { display: flex; align-items: center; justify-content: center
                      color: var(--ink-soft); }
 button.icon-button:hover { color: var(--ink); border-color: var(--ink-soft); }
 form.inline { display: inline; }
+/* With no theme chosen both switches are in the page and the system decides
+   which shows: the one that leads away from what the system is showing. */
+:root:not([data-theme]) form.theme-switch.to-light { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) form.theme-switch.to-dark { display: none; }
+  :root:not([data-theme]) form.theme-switch.to-light { display: inline; }
+}
 
 dl { margin: 0 0 1rem; }
 dt { color: var(--ink-soft); font-size: 0.85rem; margin-top: 0.9rem; }
@@ -402,19 +423,67 @@ _ICON_LOG_OUT = (
 panel draws from), inlined because these pages run no script. Decorative: every
 entry is labelled in words beside it."""
 
-NAVIGATION: tuple[tuple[str, str, str], ...] = (
-    (LANDING_PATH, "Overview", _ICON_LAYOUT_DASHBOARD),
-    (ORG_INVITATIONS_PATH, "Your organization's invitations", _ICON_BUILDING_2),
-    (ADMIN_INVITATIONS_PATH, "Invitations", _ICON_MAIL),
-    (ADMIN_PANEL_DOCUMENT, "Admin panel", _ICON_SHIELD),
+_ICON_MOON = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 '
+    '8.268c.344-.215.825-.004.803.401"/></svg>'
 )
-"""Where the signed-in frame can take you: app-relative path, label, icon.
+_ICON_SUN = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 '
+    '1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 '
+    '17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>'
+)
 
-Listed for everyone rather than resolved per role, for the reason the landing
-page has always linked both invitation pages: resolving a role here would add
-a store read to the one page that must never fail, and a person without the
-role gets the surface's 403 page, which says what to do about it.
+NEEDS_OPERATOR = "operator"
+NEEDS_OWNER = "owner"
+
+NAVIGATION: tuple[tuple[str, str, str, str | None], ...] = (
+    (LANDING_PATH, "Overview", _ICON_LAYOUT_DASHBOARD, None),
+    (ORG_INVITATIONS_PATH, "Your organization's invitations", _ICON_BUILDING_2, NEEDS_OWNER),
+    (ADMIN_INVITATIONS_PATH, "Invitations", _ICON_MAIL, NEEDS_OPERATOR),
+    (ADMIN_PANEL_DOCUMENT, "Admin panel", _ICON_SHIELD, NEEDS_OPERATOR),
+)
+"""Where the signed-in frame can take you: app-relative path, label, icon, and
+the role that opens it (``None`` for everyone).
+
+The frame offers only the entries this person's roles open. The admin panel is
+the hub administrators' tool, and an organization member shown a way into it
+would be shown a refusal. The roles come from :func:`~.authz.viewer_roles`,
+which answers "none" rather than failing when a source is down, so the landing
+page still renders while an operator works out what is wrong; the pages
+themselves keep their own gates.
 """
+
+THEMES = ("light", "dark")
+THEME_COOKIE = "collab-theme"
+"""The chosen theme, shared with the admin panel, which reads and writes the
+same cookie. Readable by script on purpose (the panel has to); it holds one of
+two words."""
+
+
+def preferred_theme(request: Request) -> str | None:
+    """The theme this browser chose, or ``None`` to follow the system."""
+
+    value = request.cookies.get(THEME_COOKIE)
+    return value if value in THEMES else None
+
+
+def set_theme_cookie(response: Response, theme: str) -> None:
+    """Record a choice for a year, for every path of this origin."""
+
+    response.set_cookie(
+        THEME_COOKIE, theme, max_age=365 * 86400, path="/", secure=True, httponly=False, samesite="lax"
+    )
+
+
+def offered(navigation, *, operator: bool, owner: bool):
+    """The entries of *navigation* these roles open."""
+
+    allowed = {None, NEEDS_OPERATOR if operator else "", NEEDS_OWNER if owner else ""}
+    return [entry for entry in navigation if entry[3] in allowed]
 
 
 def initials(name: str | None, email: str | None) -> str:
@@ -441,16 +510,38 @@ def _shell(
     identity_email: str | None,
     csrf_token: str,
     current_path: str | None,
+    operator: bool,
+    owner: bool,
+    theme: str | None,
 ) -> str:
     """The signed-in frame: header, side navigation, main column."""
 
     root = html.escape(root_path)
     entries = ""
-    for path, label, icon in NAVIGATION:
+    for path, label, icon, _needs in offered(NAVIGATION, operator=operator, owner=owner):
         current = ' current" aria-current="page' if path == current_path else ""
         entries += (
             f'<li><a class="navlink{current}" href="{root}{path}">{icon}{html.escape(label)}</a></li>'
         )
+    # The switch offers the other theme. With no choice recorded the page
+    # follows the system, which the server cannot see, so both switches are
+    # rendered and the stylesheet shows the one that applies (see
+    # `.theme-switch`). Once a choice is recorded there is one.
+    def switch_to(other: str) -> str:
+        icon = _ICON_SUN if other == "light" else _ICON_MOON
+        return (
+            f'<form class="inline theme-switch to-{other}" method="post" action="{root}{THEME_PATH}">'
+            f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
+            f'<input type="hidden" name="theme" value="{other}">'
+            f'<input type="hidden" name="next" value="{html.escape(current_path or LANDING_PATH)}">'
+            f'<button type="submit" class="icon-button" title="Switch to {other} theme"'
+            f' aria-label="Switch to {other} theme">{icon}</button></form>'
+        )
+
+    if theme in THEMES:
+        switch = switch_to("light" if theme == "dark" else "dark")
+    else:
+        switch = switch_to("dark") + switch_to("light")
     return (
         '<div class="app">'
         '<header class="header">'
@@ -459,6 +550,7 @@ def _shell(
         '<div class="header-identity">'
         f'<span class="avatar" aria-hidden="true">{html.escape(initials(identity_label, identity_email))}</span>'
         f'<span class="who">{html.escape(identity_email or identity_label)}</span>'
+        f"{switch}"
         f'<form class="inline" method="post" action="{root}/web/signout">'
         f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
         '<button type="submit" class="icon-button" title="Sign out" aria-label="Sign out">'
@@ -480,6 +572,9 @@ def render_page(
     identity_email: str | None = None,
     csrf_token: str | None = None,
     current_path: str | None = None,
+    operator: bool = False,
+    owner: bool = False,
+    theme: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
 
@@ -492,8 +587,10 @@ def render_page(
     signed-in one and gets the admin panel's frame: the header names the
     person and holds the sign-out form (whose hidden field carries the CSRF
     token, the pattern every POST form on this surface follows), and the side
-    navigation lists this surface's destinations with ``current_path`` marked.
-    Otherwise the page stands alone in one centred column.
+    navigation lists the destinations ``operator`` and ``owner`` open, with
+    ``current_path`` marked. Otherwise the page stands alone in one centred
+    column. ``theme`` is the browser's recorded choice, if any; without one the
+    page follows the system.
     """
 
     if identity_label is not None and csrf_token is not None:
@@ -504,6 +601,9 @@ def render_page(
             identity_email=identity_email,
             csrf_token=csrf_token,
             current_path=current_path,
+            operator=operator,
+            owner=owner,
+            theme=theme,
         )
     else:
         content = (
@@ -511,8 +611,9 @@ def render_page(
             f'<div class="brand"><img src="{html.escape(root_path)}{LOGO_PATH}" alt="OpenTeams Collab"></div>'
             f"<main>{body}</main></div>"
         )
+    chosen = f' data-theme="{theme}"' if theme in THEMES else ""
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="en"{chosen}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

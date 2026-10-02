@@ -301,6 +301,9 @@ def invitations_page(
     now: datetime,
     has_more: bool = False,
     notice: Notice | None = None,
+    operator: bool = False,
+    owner: bool = False,
+    theme: str | None = None,
 ) -> str:
     """Render the operator invitation page for this request.
 
@@ -329,4 +332,7 @@ def invitations_page(
         identity_email=session.email,
         csrf_token=session.csrf,
         current_path=ADMIN_INVITATIONS_PATH,
+        operator=operator,
+        owner=owner,
+        theme=theme,
     )

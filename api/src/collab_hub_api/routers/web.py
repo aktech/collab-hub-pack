@@ -38,9 +38,10 @@ from ..web.authz import (
     require_csrf,
     require_web_session,
     signin_redirect_target,
+    viewer_roles,
 )
 from ..web.data_statement import data_statement_page
-from ..web.forms import FormRefused
+from ..web.forms import FormRefused, csrf_ok, form_field, form_fields
 from ..web.pages import (
     SECURITY_HEADERS,
     STYLE_PATH,
@@ -50,7 +51,9 @@ from ..web.pages import (
     escape,
     forbidden_page,
     page_response,
+    preferred_theme,
     render_page,
+    set_theme_cookie,
     sign_in_failed_page,
     signed_out_page,
 )
@@ -77,6 +80,7 @@ from ..web.surface import (
     SIGNIN_PATH,
     SIGNOUT_PATH,
     TERMS_PATH,
+    THEME_PATH,
     WEB_LOGO_PATH,
     WebSurface,
     answers_json,
@@ -574,19 +578,33 @@ def make_router(
         if session.email and session.email != identity:
             rows += f"<dt>Email</dt><dd>{escape(session.email)}</dd>"
         root = escape(_root_path(request))
+        roles = viewer_roles(request, session)
+        destinations = ""
+        if roles.operator:
+            destinations += (
+                f'<a class="destination" href="{root}{ADMIN_INVITATIONS_PATH}">'
+                "<strong>Invitations</strong>"
+                "<span>Invite someone to this deployment, and revoke an invitation."
+                " Platform operators only.</span></a>"
+            )
+        if roles.owner:
+            destinations += (
+                f'<a class="destination" href="{root}{ORG_INVITATIONS_PATH}">'
+                "<strong>Your organization's invitations</strong>"
+                "<span>Invite someone into your organization, and revoke an"
+                " invitation. Organization owners only.</span></a>"
+            )
+        if destinations:
+            destinations = f'<div class="destinations">{destinations}</div>'
+        else:
+            destinations = (
+                "<p>There is nothing to manage from here. Open the Collab desktop"
+                " app and sign in with this same account to get started.</p>"
+            )
         body = (
             "<h1>Collab operations</h1>"
             "<p>This is the operations surface for this Collab deployment.</p>"
-            '<div class="destinations">'
-            f'<a class="destination" href="{root}{ADMIN_INVITATIONS_PATH}">'
-            "<strong>Invitations</strong>"
-            "<span>Invite someone to this deployment, and revoke an invitation."
-            " Platform operators only.</span></a>"
-            f'<a class="destination" href="{root}{ORG_INVITATIONS_PATH}">'
-            "<strong>Your organization's invitations</strong>"
-            "<span>Invite someone into your organization, and revoke an"
-            " invitation. Organization owners only.</span></a>"
-            "</div>"
+            f"{destinations}"
             f"<dl>{rows}</dl>"
         )
         return page_response(
@@ -598,8 +616,33 @@ def make_router(
                 identity_email=session.email,
                 csrf_token=session.csrf,
                 current_path=LANDING_PATH,
+                operator=roles.operator,
+                owner=roles.owner,
+                theme=preferred_theme(request),
             )
         )
+
+    @router.post(THEME_PATH)
+    async def choose_theme(
+        request: Request, session: WebSession = Depends(require_web_session)
+    ) -> Response:
+        """Record light or dark for this browser and go back where it was.
+
+        Parses its own form (the choice and the page to return to) and checks
+        the CSRF token over those fields, like the invitation pages do, so the
+        body is read once under the surface's cap. A word the stylesheet does
+        not know is dropped and the redirect still happens: a bad switch is not
+        worth an error page.
+        """
+
+        fields = await form_fields(request)
+        if not csrf_ok(request, fields, session, page=THEME_PATH):
+            raise WebForbidden(f"missing or invalid CSRF token for user {session.user!r}")
+        theme = form_field(fields, "theme", max_length=8)
+        response = _redirect(f"{_root_path(request)}{sanitize_next_path(fields.get('next'))}")
+        if theme in ("light", "dark"):
+            set_theme_cookie(response, theme)
+        return response
 
     @router.post(SIGNOUT_PATH)
     async def signout(request: Request, _session: WebSession = Depends(require_csrf)) -> Response:

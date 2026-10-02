@@ -315,11 +315,12 @@ a protection the middleware does not itself enforce.
 
 | Route | What |
 |---|---|
-| `GET /web` | Signed-in overview; redirects to sign-in when there is no session. |
+| `GET /web` | Signed-in overview; redirects to sign-in when there is no session. Offers the destinations the person's roles allow (see [The frame](#the-frame)); someone with no role is told there is nothing to manage from here. |
 | `GET /web/signin?next=&renew=` | Starts the code flow. `next` accepts only app-relative paths that are not the flow's own routes — anything else falls back to `/web` (no open redirect, and no self-referential loop). `renew=1` runs the flow even with a valid session, which is how the acceptance page obtains current claims. |
 | `GET /web/oidc/callback` | Finishes the flow, mints the session. Every failure renders one fixed page; nothing from the request or the IdP response is echoed. |
 | `POST /web/signout` | CSRF-protected; clears the session cookie. |
 | `GET /web/signed-out` | Confirmation page. |
+| `POST /web/theme` | Records the light-or-dark choice in the `collab-theme` cookie (one year, `Path=/`, `SameSite=Lax`, `Secure`; readable by page script, because the admin panel reads and writes the same cookie) and returns to `next`, sanitised like the sign-in `next`. Session + CSRF. A value other than `light` or `dark` records nothing. |
 | `GET /web/app.css` | The shared stylesheet (documents keep `style-src 'self'`). |
 | `GET /web/collab-logo.png` | The product wordmark the server-rendered pages show (documents allow `img-src 'self'`). **Anonymous**, like the stylesheet: the sign-in and acceptance pages show it before anybody has a session. |
 | `GET /web/data-statement` | The data statement ([#146]): what is stored, who can see it, and the address deletion requests go to. **Anonymous** — see below. The copy lives in `web/data_statement.py` and the acceptance page renders the same constant above its accept control. Links to the two documents below. |
@@ -480,6 +481,26 @@ registered outside every prefix in `WEB_SURFACE_PREFIXES` **fails the
 rollout**: the guard keys on those prefixes, so such a page would be reachable
 without a session no matter what its dependencies say. Adding a prefix is
 therefore a deliberate edit, not something that can be forgotten into.
+
+### The frame
+
+`render_page` draws the admin panel's frame around every signed-in page: a
+header with the wordmark, the person's initials and email, the theme switch and
+sign-out; a side navigation; and the main column. The navigation offers only
+what the person may open. `authz.viewer_roles` reads the platform role and the
+org membership live on each request: an operator is offered the hub-wide
+invitations and the admin panel, an organization owner their organization's
+invitations, and a member neither. A store that cannot answer offers nothing
+and logs a warning, so the page still renders; the navigation is an offer, and
+every page keeps its own gate. The landing page's destination cards follow the
+same roles.
+
+The theme follows the system until a choice is recorded, and then the cookie:
+the document carries `data-theme` only once there is a choice. With no choice
+the server cannot see what the system shows, so the header carries a switch to
+each theme and the stylesheet shows the one that leads away from the current
+scheme (`prefers-color-scheme`). Pages hold no script, so the switch is a form
+that posts to `/web/theme`.
 
 ### Building a page
 

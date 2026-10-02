@@ -3092,6 +3092,10 @@ def test_the_shipped_csrf_exemptions_are_exactly_the_reviewed_one():
             "/web/org/invitations/revoke",
             # #44's first-invite naming POST: same page, same predicate.
             "/web/org/invitations/name",
+            # The theme switch on the signed-in frame: parses its own form and
+            # checks the token over those fields, so the dependency walk
+            # cannot see it either.
+            "/web/theme",
         }
     )
     # Spelled literally above and compared against the constant here: #90's
@@ -3141,19 +3145,24 @@ def test_the_exemption_is_load_bearing_not_a_vacuous_pass(tmp_path, idp):
         verify_web_route_protection(app.routes)
 
 
-def test_signout_is_the_only_state_changing_route_and_it_is_gated(tmp_path, idp):
+def test_the_state_changing_routes_are_gated(tmp_path, idp):
+    """Sign-out declares the CSRF dependency; the theme switch checks the token
+    in-route over the form it parses itself, and is registered as doing so."""
+
     from collab_hub_api.web.authz import route_enforces_csrf, route_unsafe_methods
+    from collab_hub_api.web.surface import CSRF_ENFORCED_IN_ROUTE
 
     app = make_web_app(tmp_path, idp)
-    mutating = [
-        route
+    mutating = {
+        route.path: route
         for route in app.routes
         if isinstance(route, APIRoute)
         and route.path.startswith("/web")
         and route_unsafe_methods(route)
-    ]
-    assert [route.path for route in mutating] == ["/web/signout"]
-    assert route_enforces_csrf(mutating[0])
+    }
+    assert sorted(mutating) == ["/web/signout", "/web/theme"]
+    assert route_enforces_csrf(mutating["/web/signout"])
+    assert "/web/theme" in CSRF_ENFORCED_IN_ROUTE
 
 
 # --- second-reader finding 2: the guard covers three prefixes, the map check one --
@@ -3578,7 +3587,7 @@ def test_the_shipped_exemption_names_a_route_that_really_is_mounted(tmp_path, id
     # POST, and does not declare the dependency — every condition that makes
     # the entry both necessary and accurate.
     from collab_hub_api.web.authz import route_enforces_csrf, route_unsafe_methods
-    from collab_hub_api.web.surface import ACCEPT_REDEEM_PATH, CSRF_ENFORCED_IN_ROUTE
+    from collab_hub_api.web.surface import ACCEPT_REDEEM_PATH, CSRF_ENFORCED_IN_ROUTE, THEME_PATH
 
     app = make_web_app(tmp_path, idp)
     mounted = {
@@ -3586,11 +3595,13 @@ def test_the_shipped_exemption_names_a_route_that_really_is_mounted(tmp_path, id
         for route in app.routes
         if isinstance(route, APIRoute) and route.path in CSRF_ENFORCED_IN_ROUTE
     }
-    assert set(mounted) == {ACCEPT_REDEEM_PATH}
-    route = mounted[ACCEPT_REDEEM_PATH]
-    assert on_web_surface(ACCEPT_REDEEM_PATH, WEB_SURFACE_PREFIXES)
-    assert route_unsafe_methods(route) == {"POST"}
-    assert not route_enforces_csrf(route)
+    # The theme switch is mounted on every deployment too, and the same four
+    # conditions hold for it.
+    assert set(mounted) == {ACCEPT_REDEEM_PATH, THEME_PATH}
+    for path, route in mounted.items():
+        assert on_web_surface(path, WEB_SURFACE_PREFIXES)
+        assert route_unsafe_methods(route) == {"POST"}
+        assert not route_enforces_csrf(route)
     assert stale_csrf_exemptions(app.routes) == []
 
 

@@ -25,6 +25,7 @@ from test_web_surface import _StubIdp, make_web_app, sign_in, web_client  # noqa
 
 from collab_hub_api.frames.identity import IDENTITY_CLAIM_ENV  # noqa: E402
 from collab_hub_api.frames.org_source import ORG_SOURCE_ENV  # noqa: E402
+from collab_hub_api.frames.orgs import ROLE_MEMBER, ROLE_OWNER  # noqa: E402
 from collab_hub_api.web.surface import (  # noqa: E402
     ADMIN_INVITATIONS_PATH,
     ADMIN_PANEL_DOCUMENT,
@@ -33,6 +34,7 @@ from collab_hub_api.web.surface import (  # noqa: E402
     SIGNED_OUT_PATH,
     STYLE_ASSET_PATH,
     TERMS_PATH,
+    THEME_PATH,
 )
 
 PUBLIC_BASE_URL = "https://web.test"
@@ -137,9 +139,9 @@ async def test_a_signed_in_page_carries_the_panels_shell(tmp_path, idp: _StubIdp
         landing = (await client.get(LANDING_PATH)).text
         operator = (await client.get(ADMIN_INVITATIONS_PATH)).text
 
+    # An operator with no organization of their own: the hub-wide pages.
     assert nav_links(landing) == {
         LANDING_PATH: "page",
-        ORG_INVITATIONS_PATH: "",
         ADMIN_INVITATIONS_PATH: "",
         ADMIN_PANEL_DOCUMENT: "",
     }
@@ -185,3 +187,123 @@ async def test_an_anonymous_page_has_no_navigation(tmp_path, idp: _StubIdp):
     for page in (signed_out, terms):
         assert "<nav" not in page
         assert "/web/signout" not in page
+
+
+def csrf_from(page: str) -> str:
+    match = re.search(r'name="csrf_token" value="([^"]+)"', page)
+    assert match, "every signed-in page carries the CSRF token in its forms"
+    return match.group(1)
+
+
+@pytest.mark.asyncio
+async def test_the_theme_toggle_remembers_the_choice_across_pages(tmp_path, idp: _StubIdp):
+    """The panel's light-or-dark switch, on these pages too.
+
+    Without a choice the page follows the system, which the server cannot
+    see, so it carries a switch to each theme and the stylesheet shows the
+    one that leads away from what the system is showing. Choosing dark on
+    one page marks every later page as dark until the person chooses again;
+    the page then carries the one switch, to light. The choice is a cookie,
+    so it survives a new tab and is seen by the admin panel as well.
+    """
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        app.state.org_store.set_platform_role(idp.sub)
+        await sign_in(client, idp)
+        before = (await client.get(LANDING_PATH)).text
+        chosen = await client.post(
+            THEME_PATH,
+            data={"csrf_token": csrf_from(before), "theme": "dark", "next": ADMIN_INVITATIONS_PATH},
+        )
+        landing = (await client.get(LANDING_PATH)).text
+        operator = (await client.get(ADMIN_INVITATIONS_PATH)).text
+
+    assert 'data-theme="' not in before
+    assert 'class="inline theme-switch to-dark"' in before
+    assert 'class="inline theme-switch to-light"' in before
+    assert 'name="theme" value="dark"' in before
+    assert 'name="theme" value="light"' in before
+    assert chosen.status_code == 303
+    assert chosen.headers["location"] == ADMIN_INVITATIONS_PATH
+    assert "collab-theme=dark" in chosen.headers["set-cookie"]
+    for page in (landing, operator):
+        assert '<html lang="en" data-theme="dark">' in page
+        assert 'name="theme" value="light"' in page
+        assert 'name="theme" value="dark"' not in page
+
+
+@pytest.mark.asyncio
+async def test_a_theme_nobody_asked_for_is_ignored(tmp_path, idp: _StubIdp):
+    """Only the two words the stylesheet knows; anything else leaves the page
+    following the system, and a stray cookie value is not written back."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        await sign_in(client, idp)
+        before = (await client.get(LANDING_PATH)).text
+        client.cookies.set("collab-theme", "purple", domain="web.test", path="/")
+        page = (await client.get(LANDING_PATH)).text
+        refused = await client.post(THEME_PATH, data={"csrf_token": csrf_from(before), "theme": "purple"})
+
+    assert 'data-theme="' not in page
+    assert refused.status_code == 303
+    assert "collab-theme=purple" not in refused.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_the_theme_toggle_needs_a_session_and_the_csrf_token(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with web_client(app) as client:
+        anonymous = await client.post(THEME_PATH, data={"theme": "dark"})
+        await sign_in(client, idp)
+        forged = await client.post(THEME_PATH, data={"theme": "dark", "csrf_token": "not-the-token"})
+
+    assert anonymous.status_code == 303
+    assert anonymous.headers["location"].startswith("/web/signin?")
+    assert forged.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operator", "org_role", "expected"),
+    [
+        # A platform operator with no organization: the hub-wide pages only.
+        (True, None, [LANDING_PATH, ADMIN_INVITATIONS_PATH, ADMIN_PANEL_DOCUMENT]),
+        # An organization owner: their own organization's page and nothing hub-wide.
+        (False, ROLE_OWNER, [LANDING_PATH, ORG_INVITATIONS_PATH]),
+        # A member: nothing to manage from here.
+        (False, ROLE_MEMBER, [LANDING_PATH]),
+        # Both, as the local development account is.
+        (True, ROLE_OWNER, [LANDING_PATH, ORG_INVITATIONS_PATH, ADMIN_INVITATIONS_PATH, ADMIN_PANEL_DOCUMENT]),
+    ],
+)
+async def test_the_navigation_offers_only_what_the_person_may_open(
+    tmp_path, idp: _StubIdp, operator, org_role, expected
+):
+    """The frame lists the pages this person's roles open and no others.
+
+    The admin panel is the hub administrators' tool; an organization member
+    must not be shown a way into it that answers with a refusal. The landing
+    page's own destination blocks follow the same rule.
+    """
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        if operator:
+            app.state.org_store.set_platform_role(idp.sub)
+        if org_role is not None:
+            app.state.org_store.set_membership(idp.sub, "org-a", role=org_role)
+        await sign_in(client, idp)
+        landing = (await client.get(LANDING_PATH)).text
+
+    assert list(nav_links(landing)) == expected
+    # The page's own destination blocks, in the page's order: hub-wide first.
+    destinations = re.findall(r'<a class="destination" href="([^"]+)"', landing)
+    assert destinations == [p for p in (ADMIN_INVITATIONS_PATH, ORG_INVITATIONS_PATH) if p in expected]
+    if len(expected) == 1:
+        assert "nothing to manage from here" in landing

@@ -40,6 +40,11 @@ SIGNIN_PATH = "/web/signin"
 CALLBACK_PATH = "/web/oidc/callback"
 SIGNOUT_PATH = "/web/signout"
 SIGNED_OUT_PATH = "/web/signed-out"
+THEME_PATH = "/web/theme"
+"""The light-or-dark switch on the signed-in pages: a ``POST`` that records the
+choice in a cookie and sends the browser back where it was. Session-gated like
+every other state change here, and it checks CSRF in-route (it parses its own
+form), so it is listed in :data:`CSRF_ENFORCED_IN_ROUTE`."""
 
 WEB_PATH_PREFIX = "/web"
 """Every route of the shared surface lives under this prefix. The pages built
@@ -402,6 +407,7 @@ def is_public_web_path(path: str) -> bool:
 CSRF_ENFORCED_IN_ROUTE: frozenset[str] = frozenset(
     {
         ACCEPT_REDEEM_PATH,
+        THEME_PATH,
         # #91's operator invitation page. These were string literals when #123
         # shipped the registry ahead of the routes, with a note to switch them
         # the moment the constants existed; #91 defines them above, so they are

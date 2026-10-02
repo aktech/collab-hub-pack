@@ -133,7 +133,7 @@ from ..web.admin import (
     invitations_page,
     request_refused_page,
 )
-from ..web.authz import require_operator
+from ..web.authz import require_operator, viewer_roles
 from ..web.forms import (
     FORM_CONTENT_TYPE,
     MAX_FORM_BYTES,
@@ -145,7 +145,7 @@ from ..web.forms import (
     form_fields,
 )
 from ..web.operator import operator_context
-from ..web.pages import forbidden_page, page_response
+from ..web.pages import forbidden_page, page_response, preferred_theme
 from ..web.request_limits import connection_close_headers
 from ..web.session import WebSession
 from ..web.surface import (
@@ -315,6 +315,7 @@ def make_router() -> APIRouter:
             if status_code == status.HTTP_200_OK:
                 status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
+        roles = viewer_roles(request, session)
         return page_response(
             invitations_page(
                 root_path=_root_path(request),
@@ -323,6 +324,9 @@ def make_router() -> APIRouter:
                 has_more=page.has_more if page is not None else False,
                 now=now,
                 notice=notice,
+                operator=roles.operator,
+                owner=roles.owner,
+                theme=preferred_theme(request),
             ),
             status_code=status_code,
             path=ADMIN_INVITATIONS_PATH,

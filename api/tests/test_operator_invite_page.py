@@ -323,6 +323,19 @@ def csrf_from(document: str) -> str:
     return match.group(1)
 
 
+def page_fields(document: str) -> list[str]:
+    """The ``name`` of every input in the page's own content.
+
+    Scoped to ``<main>``: the signed-in frame around it carries forms of its
+    own (the theme switch, sign-out), and these tests are about what *this
+    page* asks for.
+    """
+
+    main = re.search(r"<main[^>]*>(.*?)</main>", document, re.S)
+    assert main, "the page has no main content"
+    return re.findall(r'<input[^>]*name="([^"]+)"', main.group(1))
+
+
 async def issue(client: AsyncClient, *, email: str = INVITEE, csrf: str | None = None):
     page = await client.get(ADMIN_INVITATIONS_PATH)
     return await client.post(
@@ -564,7 +577,7 @@ async def test_the_page_offers_no_way_to_name_an_organization(tmp_path, idp):
     async with web_client(app) as client:
         await signed_in(client, idp)
         page = await client.get(ADMIN_INVITATIONS_PATH)
-    fields = re.findall(r'<input[^>]*name="([^"]+)"', page.text)
+    fields = page_fields(page.text)
     assert set(fields) <= {"csrf_token", EMAIL_FIELD, INVITATION_ID_FIELD}
     assert "org_id" not in page.text
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 from fastapi import Depends, Request
@@ -618,6 +619,39 @@ def _org_store(request: Request) -> OrgStore:
     if store is None:
         raise OrgsUnavailableError("Organization storage is not available on this app")
     return store
+
+
+@dataclass(frozen=True, slots=True)
+class ViewerRoles:
+    """What the signed-in person may open on this surface."""
+
+    operator: bool = False
+    owner: bool = False
+
+
+def viewer_roles(request: Request, session: WebSession) -> ViewerRoles:
+    """The two roles the frame's navigation is drawn from, read live.
+
+    This decides what is *offered*, never what is *allowed*: every page keeps
+    its own gate, so a wrong answer here costs a missing or a dead link and
+    nothing more. That is why a source that cannot answer is treated as "no
+    role" and logged, where the gates treat it as unavailable and refuse. The
+    landing page is the one page that must keep working while an operator
+    works out what is wrong, and this runs on it.
+    """
+
+    operator = False
+    owner = False
+    try:
+        operator = resolve_platform_role(request, session.user) == PLATFORM_ROLE_OPERATOR
+    except Exception:  # noqa: BLE001 - offer nothing rather than fail the page
+        logger.warning("web_viewer_platform_role_unavailable", extra={"user": session.user})
+    try:
+        membership = _org_store(request).get_membership(session.user)
+        owner = membership is not None and membership.is_active and membership.role == ROLE_OWNER
+    except Exception:  # noqa: BLE001 - same reasoning
+        logger.warning("web_viewer_membership_unavailable", extra={"user": session.user})
+    return ViewerRoles(operator=operator, owner=owner)
 
 
 def require_org_owner(
