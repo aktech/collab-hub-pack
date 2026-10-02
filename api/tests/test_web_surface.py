@@ -511,7 +511,7 @@ async def test_full_sign_in_mints_a_session_and_lands_on_next(tmp_path, idp):
 
         overview = await client.get("/web")
         assert overview.status_code == 200
-        assert "Alice Example" in overview.text
+        assert "Hi, Alice." in overview.text
         assert "Sign out" in overview.text
 
 

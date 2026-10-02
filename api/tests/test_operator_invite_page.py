@@ -1179,12 +1179,21 @@ async def test_a_hostile_address_cannot_inject_markup(tmp_path, idp):
     assert "&lt;script&gt;" in page.text
 
 
-async def test_the_overview_links_to_the_page(tmp_path, idp):
-    app, _, _ = build_app(tmp_path, idp)
+async def test_the_overview_offers_the_admin_panel_and_not_this_page(tmp_path, idp):
+    """An operator invites from the admin panel, which names the organization.
+
+    This server-rendered page only issues org-creating invitations, so the
+    frame no longer offers it; it stays reachable by address.
+    """
+
+    app, _service, _delivery = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
         overview = await client.get("/web")
-    assert f'href="{ADMIN_INVITATIONS_PATH}"' in overview.text
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+    assert 'href="/admin/"' in overview.text
+    assert 'href="/admin/invitations"' not in overview.text
+    assert page.status_code == 200
 
 
 # ===========================================================================

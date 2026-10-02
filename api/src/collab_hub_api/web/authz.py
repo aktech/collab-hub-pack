@@ -623,10 +623,12 @@ def _org_store(request: Request) -> OrgStore:
 
 @dataclass(frozen=True, slots=True)
 class ViewerRoles:
-    """What the signed-in person may open on this surface."""
+    """What the signed-in person may open on this surface, and whose organization it is."""
 
     operator: bool = False
     owner: bool = False
+    organization: str | None = None
+    """The display name of the person's organization, once it has one."""
 
 
 def viewer_roles(request: Request, session: WebSession) -> ViewerRoles:
@@ -642,16 +644,39 @@ def viewer_roles(request: Request, session: WebSession) -> ViewerRoles:
 
     operator = False
     owner = False
+    organization = None
     try:
         operator = resolve_platform_role(request, session.user) == PLATFORM_ROLE_OPERATOR
     except Exception:  # noqa: BLE001 - offer nothing rather than fail the page
         logger.warning("web_viewer_platform_role_unavailable", extra={"user": session.user})
     try:
         membership = _org_store(request).get_membership(session.user)
-        owner = membership is not None and membership.is_active and membership.role == ROLE_OWNER
+        if membership is not None and membership.is_active:
+            owner = membership.role == ROLE_OWNER
+            organization = _organization_name(request, membership.org_id)
     except Exception:  # noqa: BLE001 - same reasoning
         logger.warning("web_viewer_membership_unavailable", extra={"user": session.user})
-    return ViewerRoles(operator=operator, owner=owner)
+    return ViewerRoles(operator=operator, owner=owner, organization=organization)
+
+
+def _organization_name(request: Request, org_id: str) -> str | None:
+    """The organization's display name for the frame, or ``None`` while it has none.
+
+    Read from the invitation service, which words a missing name as the
+    placeholder; the frame shows nothing in that case rather than the
+    placeholder, so the header never calls an organization "Unnamed". A
+    service that cannot answer is logged and treated the same way, for the
+    reason given on :func:`viewer_roles`.
+    """
+
+    from ..frames.invitations import is_placeholder_organization_name
+
+    try:
+        name = request.app.state.invitation_service.organization_name(org_id)
+    except Exception:  # noqa: BLE001 - the frame can do without the name
+        logger.warning("web_viewer_organization_name_unavailable", extra={"org_id": org_id})
+        return None
+    return None if is_placeholder_organization_name(name) else name
 
 
 def require_org_owner(

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html
 import logging
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from fastapi import Request, Response
@@ -28,13 +29,15 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import get_route_path
 
 from .surface import (
-    ADMIN_INVITATIONS_PATH,
     ADMIN_PANEL_DOCUMENT,
     LANDING_PATH,
     ORG_INVITATIONS_PATH,
     THEME_PATH,
 )
 from .surface import STYLE_ASSET_PATH as STYLE_PATH
+
+if TYPE_CHECKING:
+    from .authz import ViewerRoles
 from .surface import WEB_LOGO_PATH as LOGO_PATH
 
 logger = logging.getLogger("frames_server.web")
@@ -256,13 +259,6 @@ a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid 
 .main p { color: var(--ink-soft); max-width: 44rem; }
 .main form { max-width: 34rem; }
 
-/* The landing page's destinations: each a block that is one link. */
-.destinations { display: grid; gap: 0.75rem; margin: 1.5rem 0 2rem; max-width: 44rem; }
-.destination { display: block; padding: 1.1rem 1.35rem; border: 1px solid var(--line);
-               border-radius: 12px; color: inherit; text-decoration: none; }
-.destination:hover { border-color: var(--accent); background: var(--tint); }
-.destination strong { display: block; color: var(--accent); font-weight: 600; margin-bottom: 0.2rem; }
-.destination span { color: var(--ink-soft); font-size: 0.95rem; }
 
 /* The one action a page is asking for. */
 button { font: inherit; font-weight: 500; background: var(--accent); color: var(--on-accent); border: 0;
@@ -395,13 +391,6 @@ _ICON_LAYOUT_DASHBOARD = (
     '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect'
     ' width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>'
 )
-_ICON_BUILDING_2 = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
-    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-    '<path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0'
-    ' 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 '
-    '0 1 2 2v16"/></svg>'
-)
 _ICON_MAIL = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
     'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -437,13 +426,23 @@ _ICON_SUN = (
     '17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>'
 )
 
+
+class _NoRoles:
+    """What the frame assumes about a viewer nobody described: no roles, no organization."""
+
+    operator = False
+    owner = False
+    organization = None
+
+
+_NO_ROLES = _NoRoles()
+
 NEEDS_OPERATOR = "operator"
 NEEDS_OWNER = "owner"
 
 NAVIGATION: tuple[tuple[str, str, str, str | None], ...] = (
     (LANDING_PATH, "Overview", _ICON_LAYOUT_DASHBOARD, None),
-    (ORG_INVITATIONS_PATH, "Your organization's invitations", _ICON_BUILDING_2, NEEDS_OWNER),
-    (ADMIN_INVITATIONS_PATH, "Invitations", _ICON_MAIL, NEEDS_OPERATOR),
+    (ORG_INVITATIONS_PATH, "Invitations", _ICON_MAIL, NEEDS_OWNER),
     (ADMIN_PANEL_DOCUMENT, "Admin panel", _ICON_SHIELD, NEEDS_OPERATOR),
 )
 """Where the signed-in frame can take you: app-relative path, label, icon, and
@@ -510,15 +509,19 @@ def _shell(
     identity_email: str | None,
     csrf_token: str,
     current_path: str | None,
-    operator: bool,
-    owner: bool,
+    roles: ViewerRoles,
     theme: str | None,
 ) -> str:
-    """The signed-in frame: header, side navigation, main column."""
+    """The signed-in frame: header, side navigation, main column.
+
+    The header names the organization the person belongs to once it has a
+    name, and the surface ("Operations") otherwise, so an owner always sees
+    whose pages these are without the pages having to say so.
+    """
 
     root = html.escape(root_path)
     entries = ""
-    for path, label, icon, _needs in offered(NAVIGATION, operator=operator, owner=owner):
+    for path, label, icon, _needs in offered(NAVIGATION, operator=roles.operator, owner=roles.owner):
         current = ' current" aria-current="page' if path == current_path else ""
         entries += (
             f'<li><a class="navlink{current}" href="{root}{path}">{icon}{html.escape(label)}</a></li>'
@@ -546,7 +549,7 @@ def _shell(
         '<div class="app">'
         '<header class="header">'
         f'<div class="header-brand"><img class="wordmark" src="{root}{LOGO_PATH}" alt="OpenTeams Collab">'
-        '<span class="header-surface">Operations</span></div>'
+        f'<span class="header-surface">{html.escape(roles.organization or "Operations")}</span></div>'
         '<div class="header-identity">'
         f'<span class="avatar" aria-hidden="true">{html.escape(initials(identity_label, identity_email))}</span>'
         f'<span class="who">{html.escape(identity_email or identity_label)}</span>'
@@ -572,8 +575,7 @@ def render_page(
     identity_email: str | None = None,
     csrf_token: str | None = None,
     current_path: str | None = None,
-    operator: bool = False,
-    owner: bool = False,
+    roles: ViewerRoles | None = None,
     theme: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
@@ -601,8 +603,7 @@ def render_page(
             identity_email=identity_email,
             csrf_token=csrf_token,
             current_path=current_path,
-            operator=operator,
-            owner=owner,
+            roles=roles if roles is not None else _NO_ROLES,
             theme=theme,
         )
     else:

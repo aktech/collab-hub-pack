@@ -139,13 +139,15 @@ async def test_a_signed_in_page_carries_the_panels_shell(tmp_path, idp: _StubIdp
         landing = (await client.get(LANDING_PATH)).text
         operator = (await client.get(ADMIN_INVITATIONS_PATH)).text
 
-    # An operator with no organization of their own: the hub-wide pages.
+    # An operator with no organization of their own: the overview and the
+    # admin panel. The server-rendered operator page is reachable but is not
+    # offered: the panel is where an operator invites.
     assert nav_links(landing) == {
         LANDING_PATH: "page",
-        ADMIN_INVITATIONS_PATH: "",
         ADMIN_PANEL_DOCUMENT: "",
     }
-    assert nav_links(operator)[ADMIN_INVITATIONS_PATH] == "page"
+    assert ADMIN_INVITATIONS_PATH not in nav_links(operator)
+    assert nav_links(operator)[ADMIN_PANEL_DOCUMENT] == ""
     header = re.search(r"<header[^>]*>(.*?)</header>", landing, re.S)
     assert header, "no header"
     assert "alice@example.com" in header.group(1)
@@ -267,33 +269,45 @@ async def test_the_theme_toggle_needs_a_session_and_the_csrf_token(tmp_path, idp
     assert forged.status_code == 403
 
 
+class NamedOrganizations:
+    """The one thing the frame asks the invitation service: an organization's name."""
+
+    def organization_name(self, org_id):
+        return {"org-a": "Acme Labs"}.get(org_id) or "Unnamed organization"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("operator", "org_role", "expected"),
+    ("operator", "org_role", "expected", "surface"),
     [
-        # A platform operator with no organization: the hub-wide pages only.
-        (True, None, [LANDING_PATH, ADMIN_INVITATIONS_PATH, ADMIN_PANEL_DOCUMENT]),
-        # An organization owner: their own organization's page and nothing hub-wide.
-        (False, ROLE_OWNER, [LANDING_PATH, ORG_INVITATIONS_PATH]),
-        # A member: nothing to manage from here.
-        (False, ROLE_MEMBER, [LANDING_PATH]),
+        # A platform operator with no organization: the admin panel, and the
+        # header names the surface.
+        (True, None, [LANDING_PATH, ADMIN_PANEL_DOCUMENT], "Operations"),
+        # An organization owner: their organization's invitations, and the
+        # header names the organization.
+        (False, ROLE_OWNER, [LANDING_PATH, ORG_INVITATIONS_PATH], "Acme Labs"),
+        # A member: nothing to manage from here, but it is still their organization.
+        (False, ROLE_MEMBER, [LANDING_PATH], "Acme Labs"),
         # Both, as the local development account is.
-        (True, ROLE_OWNER, [LANDING_PATH, ORG_INVITATIONS_PATH, ADMIN_INVITATIONS_PATH, ADMIN_PANEL_DOCUMENT]),
+        (True, ROLE_OWNER, [LANDING_PATH, ORG_INVITATIONS_PATH, ADMIN_PANEL_DOCUMENT], "Acme Labs"),
     ],
 )
 async def test_the_navigation_offers_only_what_the_person_may_open(
-    tmp_path, idp: _StubIdp, operator, org_role, expected
+    tmp_path, idp: _StubIdp, operator, org_role, expected, surface
 ):
     """The frame lists the pages this person's roles open and no others.
 
     The admin panel is the hub administrators' tool; an organization member
-    must not be shown a way into it that answers with a refusal. The landing
-    page's own destination blocks follow the same rule.
+    must not be shown a way into it that answers with a refusal. The owner's
+    page is simply "Invitations": the header already says whose organization
+    this is. The landing page greets the person and says what this surface is
+    for them; its links live in the navigation and nowhere else.
     """
 
     app = build_app(tmp_path, idp)
 
     async with app.router.lifespan_context(app), web_client(app) as client:
+        app.state.invitation_service = NamedOrganizations()
         if operator:
             app.state.org_store.set_platform_role(idp.sub)
         if org_role is not None:
@@ -302,8 +316,15 @@ async def test_the_navigation_offers_only_what_the_person_may_open(
         landing = (await client.get(LANDING_PATH)).text
 
     assert list(nav_links(landing)) == expected
-    # The page's own destination blocks, in the page's order: hub-wide first.
-    destinations = re.findall(r'<a class="destination" href="([^"]+)"', landing)
-    assert destinations == [p for p in (ADMIN_INVITATIONS_PATH, ORG_INVITATIONS_PATH) if p in expected]
+    labels = re.findall(r'<a class="navlink[^"]*" href="[^"]+">(?:<svg.*?</svg>)?([^<]+)</a>', landing)
+    assert "Your organization" not in " ".join(labels)
+    if ORG_INVITATIONS_PATH in expected:
+        assert "Invitations" in labels
+    assert f'<span class="header-surface">{surface}</span>' in landing
+    assert "<h1>Hi, Alice.</h1>" in landing
+    assert "Signed in as" not in landing and "<dt>Email</dt>" not in landing
+    assert 'class="destination"' not in landing
+    if org_role is not None:
+        assert "Acme Labs" in landing.split("<main")[1]
     if len(expected) == 1:
         assert "nothing to manage from here" in landing

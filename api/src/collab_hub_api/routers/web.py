@@ -70,11 +70,9 @@ from ..web.session import (
     set_transient_cookie,
 )
 from ..web.surface import (
-    ADMIN_INVITATIONS_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
     LANDING_PATH,
-    ORG_INVITATIONS_PATH,
     PRIVACY_PATH,
     SIGNED_OUT_PATH,
     SIGNIN_PATH,
@@ -557,56 +555,42 @@ def make_router(
     async def overview(
         request: Request, session: WebSession = Depends(require_web_session)
     ) -> Response:
-        """The signed-in overview: proves the session and hosts the sign-out form.
+        """The signed-in overview: proves the session and says what this surface is for.
 
-        The operator invitation page (#91) is linked unconditionally rather
-        than only for operators. Resolving the platform role here would make
-        the *overview* fail on a deployment with no role source — the one page
-        that must keep working so an operator can at least see they are signed
-        in — and a non-operator following the link gets the surface's 403 page,
-        which is a real answer and says what to do about it. The owner
-        invitation page (#142) is linked the same way for the same reasons:
-        resolving membership here would add a store read to the page that must
-        never fail, and the link's worst case is the same honest 403.
+        The roles are read through :func:`viewer_roles`, which offers nothing
+        and logs when a source cannot answer, so this page still renders while
+        an operator works out what is wrong; every page it leads to keeps its
+        own gate.
         """
 
         identity = session.name or session.email or session.user
-        # The header names the account by address, as the panel does; the
-        # page itself says who that is, so a person with several accounts can
-        # tell which one they are using before they act.
-        rows = f"<dt>Signed in as</dt><dd>{escape(identity)}</dd>"
-        if session.email and session.email != identity:
-            rows += f"<dt>Email</dt><dd>{escape(session.email)}</dd>"
-        root = escape(_root_path(request))
         roles = viewer_roles(request, session)
-        destinations = ""
-        if roles.operator:
-            destinations += (
-                f'<a class="destination" href="{root}{ADMIN_INVITATIONS_PATH}">'
-                "<strong>Invitations</strong>"
-                "<span>Invite someone to this deployment, and revoke an invitation."
-                " Platform operators only.</span></a>"
-            )
+        # The header already carries the address, so the page greets the
+        # person by their first name and says what this surface is for them.
+        # Its links live in the navigation and nowhere else.
+        first_name = (session.name or "").split()[0] if session.name else identity
+        organization = roles.organization or "your organization"
         if roles.owner:
-            destinations += (
-                f'<a class="destination" href="{root}{ORG_INVITATIONS_PATH}">'
-                "<strong>Your organization's invitations</strong>"
-                "<span>Invite someone into your organization, and revoke an"
-                " invitation. Organization owners only.</span></a>"
+            purpose = (
+                f"This is where you look after {escape(organization)}: invite people"
+                " into it, and see who has joined."
             )
-        if destinations:
-            destinations = f'<div class="destinations">{destinations}</div>'
+            if roles.operator:
+                purpose += " The admin panel covers the hub itself."
+        elif roles.operator:
+            purpose = (
+                "This is where you look after this Collab deployment. The admin panel"
+                " manages its models, people and connectors, and invitations into"
+                " every organization."
+            )
         else:
-            destinations = (
-                "<p>There is nothing to manage from here. Open the Collab desktop"
-                " app and sign in with this same account to get started.</p>"
+            purpose = (
+                "There is nothing to manage from here. Open the Collab desktop app"
+                " and sign in with this same account to get started."
             )
-        body = (
-            "<h1>Collab operations</h1>"
-            "<p>This is the operations surface for this Collab deployment.</p>"
-            f"{destinations}"
-            f"<dl>{rows}</dl>"
-        )
+            if roles.organization:
+                purpose = f"You are a member of {escape(roles.organization)}. {purpose}"
+        body = f"<h1>Hi, {escape(first_name)}.</h1><p>{purpose}</p>"
         return page_response(
             render_page(
                 title="Collab operations",
@@ -616,8 +600,7 @@ def make_router(
                 identity_email=session.email,
                 csrf_token=session.csrf,
                 current_path=LANDING_PATH,
-                operator=roles.operator,
-                owner=roles.owner,
+                roles=roles,
                 theme=preferred_theme(request),
             )
         )
