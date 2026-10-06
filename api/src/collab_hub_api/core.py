@@ -933,19 +933,31 @@ def _built_registration_ui(config) -> BuiltBundle | None:
 
     ``None`` does not unmount the invitation page: its routes stay, and the
     page says the deployment cannot show it. See :mod:`.routers.invite`.
+
+    Unlike the panel's, a missing registration build is logged at **error**
+    level, configured or not: every invitation link then answers 503, and an
+    image built without the bundle otherwise starts looking healthy.
     """
 
-    return _built_bundle(
-        config, REGISTRATION_BUNDLE_DIRECTORY, missing="registration_ui_missing_index"
-    )
+    bundle = _built_bundle(config, REGISTRATION_BUNDLE_DIRECTORY, missing=None)
+    if bundle is None:
+        configured = config.web.admin_ui_dist
+        logger.error(
+            "registration_ui_missing",
+            extra={
+                "path": str(Path(configured) / REGISTRATION_BUNDLE_DIRECTORY) if configured else None,
+                "consequence": "every invitation link answers 503 until the bundle is built",
+            },
+        )
+    return bundle
 
 
-def _built_bundle(config, directory: str, *, missing: str) -> BuiltBundle | None:
+def _built_bundle(config, directory: str, *, missing: str | None) -> BuiltBundle | None:
     configured = config.web.admin_ui_dist
     if not configured:
         return None
     root = Path(configured) / directory
     bundle = BuiltBundle.at(root)
-    if bundle is None:
+    if bundle is None and missing is not None:
         logger.warning(missing, extra={"path": str(root)})
     return bundle

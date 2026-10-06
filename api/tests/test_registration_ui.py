@@ -8,6 +8,7 @@ invitation code, is the front-end suite's business.
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -235,3 +236,24 @@ async def test_a_deployment_with_no_built_bundle_says_so_on_the_invitation_page(
     assert "<script" not in page.text
     assert "Your invitation has not been used" in page.text
     assert asset.status_code != 200
+
+
+@pytest.mark.parametrize("dist", ["unset", "empty"])
+def test_a_hub_without_the_registration_build_says_so_at_error_level(tmp_path, idp, caplog, dist):
+    """Every invitation link would answer 503, so starting quietly is not enough.
+
+    Logged at error level whether the bundle directory is not configured at all
+    or is configured and holds no registration build: either way the image was
+    built without it, and an operator should see that before an invitee does.
+    """
+
+    web = {"public_base_url": "https://web.test"}
+    if dist == "empty":
+        (tmp_path / "empty-dist").mkdir()
+        web["admin_ui_dist"] = str(tmp_path / "empty-dist")
+    with caplog.at_level(logging.WARNING):
+        make_web_app(tmp_path, idp, web=web)
+
+    refusals = [r for r in caplog.records if r.getMessage() == "registration_ui_missing"]
+    assert len(refusals) == 1
+    assert refusals[0].levelno == logging.ERROR

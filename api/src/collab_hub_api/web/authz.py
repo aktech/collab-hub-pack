@@ -264,7 +264,16 @@ def route_offence(route: object, prefixes: Sequence[str]) -> str | None:
     if not isinstance(route, APIRoute):
         return f"{path} is a {type(route).__name__}, which this surface does not serve"
     if is_public_web_path(path):
-        return None
+        # Anonymous for reading only. A public path that answers anything else
+        # would be an anonymous write no allowlist line was reviewed for, so
+        # it is named here like any other route without a session.
+        writes = set(route.methods or ()) - {"GET", "HEAD"}
+        if not writes:
+            return None
+        return (
+            f"{path} is public for reading, and answers {', '.join(sorted(writes))}"
+            " with no web session"
+        )
     if not route_enforces_session(route):
         return f"{path} requires no web session and is not in PUBLIC_WEB_PATHS"
     unsafe = route_unsafe_methods(route)

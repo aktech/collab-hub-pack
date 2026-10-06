@@ -3009,6 +3009,40 @@ def test_the_csrf_offence_names_the_methods_it_refused(tmp_path, idp):
     assert "GET" not in reasons[0]
 
 
+@pytest.mark.parametrize("methods", [["POST"], ["GET", "PUT"], ["DELETE"]])
+def test_a_public_asset_path_is_exempt_only_for_reads(tmp_path, idp, methods):
+    """The public asset prefix makes a file readable without a session, nothing more.
+
+    A route under it that answers anything but GET or HEAD would be an
+    anonymous write that no allowlist line was reviewed for, so the lint
+    names it, the same way it names any other route with no session.
+    """
+
+    router = APIRouter()
+
+    @router.api_route("/invite/assets/{filename}", methods=methods)
+    async def anonymous_write(filename: str):
+        return {"ok": True}
+
+    app = make_web_app(tmp_path, idp)
+    register_ahead_of_the_mcp_mount(app, router)
+    reasons = [reason for route, reason in offending_web_routes(app.routes) if route.endpoint is anonymous_write]
+    assert len(reasons) == 1
+    assert "/invite/assets/{filename}" in reasons[0]
+
+
+def test_reading_a_public_asset_needs_no_allowlist_line(tmp_path, idp):
+    router = APIRouter()
+
+    @router.api_route("/invite/assets/{filename}", methods=["GET", "HEAD"])
+    async def asset(filename: str):
+        return {"ok": True}
+
+    app = make_web_app(tmp_path, idp)
+    register_ahead_of_the_mcp_mount(app, router)
+    assert [r for r, _ in offending_web_routes(app.routes) if r.endpoint is asset] == []
+
+
 def test_a_post_carrying_require_csrf_passes_the_check(tmp_path, idp):
     router = session_gated_router()
 

@@ -285,15 +285,22 @@ api-membership: services keycloak ui | $(LOCAL)/frames ## API in multi-tenant mo
 	cd $(API_DIR) && env $(BASE_ENV) $(MEMBERSHIP_ENV) $(PG_ENV) $(WEB_ENV) uv run python -m collab_hub_api
 
 # `npm ci` installs exactly what the lockfile pins and `--ignore-scripts` runs
-# no package lifecycle hook, the same way the image and CI build it. Skipped
-# with a message where Node is not installed, so the two targets above still
-# start: the API then serves no admin panel and the invitation page says the
-# build is missing.
+# no package lifecycle hook, the same way the image and CI build it. It runs
+# only when the lockfile is newer than the installed tree (npm records the
+# install in node_modules/.package-lock.json), so starting the API again needs
+# no network. Where Node is missing, or the install or build fails (offline,
+# say), this says so and carries on, so the two targets above still start:
+# the API then serves whatever was built last, or no panel, and logs
+# `registration_ui_missing` if the invitation page has no build.
 ui: ## Build the admin panel and registration pages (needs Node; skipped without it)
-	@if command -v npm >/dev/null 2>&1; then \
-		cd $(ADMIN_UI_DIR) && npm ci --ignore-scripts --no-audit --no-fund && npm run build; \
-	else \
+	@if ! command -v npm >/dev/null 2>&1; then \
 		echo "npm not found: skipping the web UI build. /admin and /invite/accept need it."; \
+	else \
+		cd $(ADMIN_UI_DIR) && \
+		if [ ! node_modules/.package-lock.json -nt package-lock.json ]; then \
+			npm ci --ignore-scripts --no-audit --no-fund || { echo "npm ci failed: starting with the last web UI build, if any."; exit 0; }; \
+		fi && \
+		{ npm run build || echo "The web UI build failed: starting with the last build, if any."; }; \
 	fi
 
 # ---------------------------------------------------------------------------

@@ -113,3 +113,6 @@ button.link:disabled { color: var(--ink-soft); cursor: default; text-decoration:
 .bad { color: var(--warn); }
 
 noscript { display: block; max-width: 38rem; margin: 0 auto; padding: 4rem 1.5rem; }
+
+/* The static line index.html shows until the script runs, in the page's column. */
+.loading { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
